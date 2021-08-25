@@ -8,7 +8,7 @@ Estimation problems:
 - Perspective projection matrix (3 points P3P, linear 6 points)
 
 Install and run:
-1) ```mkdir build```
+1) ```mkdir build && cd build```
 2) ```cmake ..```
 3) ```make -j $nproc```
 4) ```./vsac```
@@ -19,8 +19,8 @@ python ./setup.py install
 ```
 
 Libraries:
-- OpenCV (Required).
-- Eigen (Optional, recommended).
+- OpenCV (required)
+- Eigen (optional, recommended)
 - LAPACK (optional)
 
 Note, to run essential matrix estimation either Eigen or LAPACK has to be installed. \
