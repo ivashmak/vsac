@@ -1,6 +1,5 @@
 #include "samples/samples.hpp"
 #include "test/test.hpp"
-#include <iostream>
 
 int main (int /*args*/, char** /*argv*/) {
 //    Test::test();

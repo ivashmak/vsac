@@ -31,10 +31,8 @@ public:
             (*a_++) = 1;
         }
 
-        if (!Math::eliminateUpperTriangular(a, m, n)) {
-            // std::cout << "reject pivot\n";            
+        if (!Math::eliminateUpperTriangular(a, m, n))
             return 0;
-        }
 
         /*
          [a11 a12 a13 a14 a15 a16 a17 a18 a19]

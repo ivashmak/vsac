@@ -9,8 +9,11 @@ if(CCACHE_FOUND)
     set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK ccache)
 endif(CCACHE_FOUND)
 
-# set C++ version
 SET (CMAKE_CXX_STANDARD 11)
+if (NOT DEFINED ${CMAKE_INSTALL_PREFIX})
+    message("Set CMAKE_INSTALL_PREFIX to current directory")
+    SET(CMAKE_INSTALL_PREFIX ".")
+endif()
 
 # add optimization plus warnings
 IF(CMAKE_COMPILER_IS_GNUCXX)
@@ -85,3 +88,6 @@ target_link_libraries(tests ${OpenCV_LIBS} src)
 add_executable(${PROJECT_NAME} main.cpp ${SRCS_VSAC} ${SRCS_SAMPLES} ${SRCS_EXPS})
 target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS} src samples tests ${lapack_libs})
 #####################################################
+
+#install(TARGETS src DESTINATION ${CMAKE_INSTALL_PREFIX})
+#https://stackoverflow.com/questions/17511496/how-to-create-a-shared-library-with-cmake
