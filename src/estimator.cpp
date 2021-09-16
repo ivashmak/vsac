@@ -220,10 +220,7 @@ public:
         : points_mat(&points_), points ((float *) points_.data)
         , m11(0), m12(0), m13(0), m21(0), m22(0), m23(0), m31(0), m32(0), m33(0)
         , minv11(0), minv12(0), minv13(0), minv21(0), minv22(0), minv23(0), minv31(0), minv32(0), minv33(0)
-        , errors(points_.rows)
-    {
-        CV_DbgAssert(points);
-    }
+        , errors(points_.rows) { CV_DbgAssert(points); }
 
     inline void setModelParameters (const Mat &model) override {
         const auto * const m = (double *) model.data;
@@ -237,9 +234,9 @@ public:
         minv21=(float)minv[3]; minv22=(float)minv[4]; minv23=(float)minv[5];
         minv31=(float)minv[6]; minv32=(float)minv[7]; minv33=(float)minv[8];
     }
-    inline float getError (int point_idx) const override {
-        const int smpl = 4*point_idx;
-        const float x1=points[smpl], y1=points[smpl+1], x2=points[smpl+2], y2=points[smpl+3];
+    inline float getError (int idx) const override {
+        idx *= 4;
+        const float x1=points[idx], y1=points[idx+1], x2=points[idx+2], y2=points[idx+3];
         const float est_z2 = 1 / (m31 * x1 + m32 * y1 + m33),
                     dx2 =  x2 -  (m11 * x1 + m12 * y1 + m13) * est_z2,
                     dy2 =  y2 -  (m21 * x1 + m22 * y1 + m23) * est_z2;
@@ -276,6 +273,7 @@ private:
     const float * const points;
     float m11, m12, m13, m21, m22, m23, m31, m32, m33;
     std::vector<float> errors;
+//    cv::Mat px1, py1, px2, py2, ones, temp1, temp2, errs;
 public:
     explicit ReprojectionErrorForwardImpl (const Mat &points_)
         : points_mat(&points_), points ((float *)points_.data)
@@ -283,6 +281,11 @@ public:
         , errors(points_.rows)
     {
         CV_DbgAssert(points);
+//        points_.col(0).copyTo(px1);
+//        points_.col(1).copyTo(py1);
+//        points_.col(2).copyTo(px2);
+//        points_.col(3).copyTo(py2);
+//        ones = Mat_<float>::ones(points_.rows, 1);
     }
 
     inline void setModelParameters (const Mat &model) override {
@@ -291,9 +294,9 @@ public:
         m21=static_cast<float>(m[3]); m22=static_cast<float>(m[4]); m23=static_cast<float>(m[5]);
         m31=static_cast<float>(m[6]); m32=static_cast<float>(m[7]); m33=static_cast<float>(m[8]);
     }
-    inline float getError (int point_idx) const override {
-        const int smpl = 4*point_idx;
-        const float x1 = points[smpl], y1 = points[smpl+1], x2 = points[smpl+2], y2 = points[smpl+3];
+    inline float getError (int idx) const override {
+        idx *= 4;
+        const float x1 = points[idx], y1 = points[idx+1], x2 = points[idx+2], y2 = points[idx+3];
         const float est_z2 = 1 / (m31 * x1 + m32 * y1 + m33),
                     dx2 =  x2 -  (m11 * x1 + m12 * y1 + m13) * est_z2,
                     dy2 =  y2 -  (m21 * x1 + m22 * y1 + m23) * est_z2;
@@ -309,6 +312,15 @@ public:
                         dy2 =  y2 -  (m21 * x1 + m22 * y1 + m23) * est_z2;
             errors[point_idx] = dx2 * dx2 + dy2 * dy2;
         }
+
+        // slower:
+//        auto scale = m31 * px1 + m32 * py1 + m33 * ones;
+//        cv::divide(m11 * px1 + m12 * py1 + m13 * ones, scale, temp1);
+//        cv::divide(m21 * px1 + m22 * py1 + m23 * ones, scale, temp2);
+//        cv::pow(temp1 - px2, 2, temp1);
+//        cv::pow(temp2 - py2, 2, temp2);
+//        temp1 += temp2;
+//        std::copy((float*)temp1.data, (float*)temp1.data+points_mat->rows, errors.begin());
         return errors;
     }
 };
@@ -316,98 +328,6 @@ Ptr<ReprojectionErrorForward>
 ReprojectionErrorForward::create(const Mat &points) {
     return makePtr<ReprojectionErrorForwardImpl>(points);
 }
-
-class FundamentalAlgebraicErrorImpl : public FundamentalAlgebraicError {
-private:
-    const Mat * points_mat;
-    const float * const points;
-    std::vector<float> errors;
-    float m11, m12, m13, m21, m22, m23, m31, m32, m33;
-public:
-    explicit FundamentalAlgebraicErrorImpl (const Mat &points_)
-            : points_mat(&points_), points ((float *) points_.data),
-            m11(0), m12(0), m13(0), m21(0), m22(0), m23(0), m31(0), m32(0), m33(0) {
-        errors = std::vector<float>(points_.rows);
-    }
-
-    inline void setModelParameters (const Mat &model) override {
-        const auto * const m = (double *) model.data;
-        m11=static_cast<float>(m[0]); m12=static_cast<float>(m[1]); m13=static_cast<float>(m[2]);
-        m21=static_cast<float>(m[3]); m22=static_cast<float>(m[4]); m23=static_cast<float>(m[5]);
-        m31=static_cast<float>(m[6]); m32=static_cast<float>(m[7]); m33=static_cast<float>(m[8]);
-    }
-    inline float getError (int /*point_idx*/) const override {
-        return FLT_MAX;
-    }
-    const std::vector<float> &getErrors (const Mat &F) override {
-        setModelParameters(F);
-        for (int pt = 0; pt < points_mat->rows; pt++) {
-            const int smpl = 4*pt;
-            const float x1=points[smpl], y1=points[smpl+1], x2=points[smpl+2], y2=points[smpl+3];
-            const auto err = x2 * (m11 * x1 + m12 * y1 + m13) + y2 * (m21 * x1 + m22 * y1 + m23) + m31 * x1 + m32 * y1 + m33;
-            errors[pt] = err * err;
-        }
-        return errors;
-    }
-};
-Ptr<FundamentalAlgebraicError> FundamentalAlgebraicError::create(const Mat &points) {
-    return makePtr<FundamentalAlgebraicErrorImpl>(points);
-}
-
-class FundamentalGeometricErrorImpl : public FundamentalGeometricError {
-private:
-    const Mat * points_mat;
-    const float * const points;
-    std::vector<float> errors;
-public:
-    explicit FundamentalGeometricErrorImpl (const Mat &points_)
-        : points_mat(&points_), points ((float *) points_.data) {
-        errors = std::vector<float>(points_.rows);
-    }
-
-    inline void setModelParameters (const Mat &/*model*/) override {
-    }
-    inline float getError (int /*point_idx*/) const override {
-        assert(false);
-        return FLT_MAX;
-    }
-    const std::vector<float> &getErrors (const Mat &F_) override {
-        Matx33d F (F_);
-        F = F.t();
-        const Matx23d S (1, 0, 0, 0, 1, 0);
-        const Matx32d St = S.t();
-        const Matx23d SE = S * F, SEt = S * F.t();
-        const Matx22d SESt = S * F * St;
-        for (int pt = 0; pt < points_mat->rows; pt++) {
-            Vec3d x(points[4 * pt], points[4 * pt + 1], 1);
-            Vec3d xp(points[4 * pt + 2], points[4 * pt + 3], 1);
-
-            auto n = SE * xp, np = SEt * x;
-            const auto a = (Vec2d(Mat(n.t() * SESt))).dot(np);
-            const auto b = 0.5 * (n.dot(n) + np.dot(np));
-            const auto c = (Vec3d(Mat(x.t() * F))).dot(xp);
-            auto lambda = c / (b + sqrt(b * b - a * c));
-            auto dx = lambda * n;
-            auto dxp = lambda * np;
-            n -= SESt * dxp;
-            np -= SESt.t() * dx;
-
-            // niter1
-            dx = dx.dot(n) * n / n.dot(n);
-            dxp = dxp.dot(np) * np / np.dot(np);
-
-            x -= St * dx;
-            xp -= St * dxp;
-            const auto dx1 = points[4*pt] - x[0], dy1 = points[4*pt+1] - x[1], dx2 = points[4*pt+2] - xp[0], dy2 = points[4*pt+3] - xp[1];
-            errors[pt] = dx1 * dx1 + dy1 * dy1 + dx2 * dx2 + dy2 * dy2;
-        }
-        return errors;
-    }
-};
-Ptr<FundamentalGeometricError> FundamentalGeometricError::create(const Mat &points) {
-    return makePtr<FundamentalGeometricErrorImpl>(points);
-}
-
 
 class SampsonErrorImpl : public SampsonError {
 private:
@@ -419,10 +339,7 @@ public:
     explicit SampsonErrorImpl (const Mat &points_)
         : points_mat(&points_), points ((float *) points_.data)
         , m11(0), m12(0), m13(0), m21(0), m22(0), m23(0), m31(0), m32(0), m33(0)
-        , errors(points_.rows)
-    {
-        CV_DbgAssert(points);
-    }
+        , errors(points_.rows) { CV_DbgAssert(points); }
 
     inline void setModelParameters (const Mat &model) override {
         const auto * const m = (double *) model.data;
@@ -441,9 +358,9 @@ public:
      *               [ F(3,1)  F(3,2)  F(3,3) ]   [ 1  ]
      *
      */
-    inline float getError (int point_idx) const override {
-        const int smpl = 4*point_idx;
-        const float x1=points[smpl], y1=points[smpl+1], x2=points[smpl+2], y2=points[smpl+3];
+    inline float getError (int idx) const override {
+        idx *= 4;
+        const float x1=points[idx], y1=points[idx+1], x2=points[idx+2], y2=points[idx+3];
         const float F_pt1_x = m11 * x1 + m12 * y1 + m13,
                     F_pt1_y = m21 * x1 + m22 * y1 + m23;
         const float pt2_F_x = x2 * m11 + y2 * m21 + m31,
@@ -468,8 +385,7 @@ public:
         return errors;
     }
 };
-Ptr<SampsonError>
-SampsonError::create(const Mat &points) {
+Ptr<SampsonError> SampsonError::create(const Mat &points) {
     return makePtr<SampsonErrorImpl>(points);
 }
 
@@ -483,10 +399,7 @@ public:
     explicit SymmetricGeometricDistanceImpl (const Mat &points_)
         : points_mat(&points_), points ((float *) points_.data)
         , m11(0), m12(0), m13(0), m21(0), m22(0), m23(0), m31(0), m32(0), m33(0)
-        , errors(points_.rows)
-    {
-        CV_DbgAssert(points);
-    }
+        , errors(points_.rows) { CV_DbgAssert(points); }
 
     inline void setModelParameters (const Mat &model) override {
         const auto * const m = (double *) model.data;
@@ -524,8 +437,7 @@ public:
         return errors;
     }
 };
-Ptr<SymmetricGeometricDistance>
-SymmetricGeometricDistance::create(const Mat &points) {
+Ptr<SymmetricGeometricDistance> SymmetricGeometricDistance::create(const Mat &points) {
     return makePtr<SymmetricGeometricDistanceImpl>(points);
 }
 
@@ -539,11 +451,7 @@ public:
     explicit ReprojectionErrorPmatrixImpl (const Mat &points_)
         : points_mat(&points_), points ((float *) points_.data)
         , p11(0), p12(0), p13(0), p14(0), p21(0), p22(0), p23(0), p24(0), p31(0), p32(0), p33(0), p34(0)
-        , errors(points_.rows)
-    {
-        CV_DbgAssert(points);
-    }
-
+        , errors(points_.rows) { CV_DbgAssert(points); }
 
     inline void setModelParameters (const Mat &model) override {
         const auto * const p = (double *) model.data;
@@ -552,10 +460,10 @@ public:
         p31 = (float)p[8]; p32 = (float)p[9]; p33 = (float)p[10]; p34 = (float)p[11];
     }
 
-    inline float getError (int point_idx) const override {
-        const int smpl = 5*point_idx;
-        const float u = points[smpl  ], v = points[smpl+1],
-                    x = points[smpl+2], y = points[smpl+3], z = points[smpl+4];
+    inline float getError (int idx) const override {
+        idx *= 5;
+        const float u = points[idx  ], v = points[idx+1],
+                    x = points[idx+2], y = points[idx+3], z = points[idx+4];
         const float depth = 1 / (p31 * x + p32 * y + p33 * z + p34);
         const float du =    u - (p11 * x + p12 * y + p13 * z + p14) * depth;
         const float dv =    v - (p21 * x + p22 * y + p23 * z + p24) * depth;
@@ -596,10 +504,7 @@ public:
     explicit ReprojectionDistanceAffineImpl (const Mat &points_)
         : points_mat(&points_), points ((float *) points_.data)
         , m11(0), m12(0), m13(0), m21(0), m22(0), m23(0)
-        , errors(points_.rows)
-    {
-        CV_DbgAssert(points);
-    }
+        , errors(points_.rows) { CV_DbgAssert(points); }
 
     inline void setModelParameters (const Mat &model) override {
         const auto * const m = (double *) model.data;
@@ -649,7 +554,6 @@ public:
             mean_pts2_x += points[smpl + 2];
             mean_pts2_y += points[smpl + 3];
         }
-
         mean_pts1_x /= sample_size; mean_pts1_y /= sample_size;
         mean_pts2_x /= sample_size; mean_pts2_y /= sample_size;
 

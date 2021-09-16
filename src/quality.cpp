@@ -66,7 +66,16 @@ public:
                 break;
         }
         // score is negative inlier number! If less then better
-        return Score(inlier_number, -static_cast<double>(inlier_number));
+        return {inlier_number, -static_cast<double>(inlier_number)};
+    }
+
+    Score getScore (const std::vector<float> &errors) const override {
+        int inlier_number = 0;
+        for (int point = 0; point < points_size; point++)
+            if (errors[point] < threshold)
+                inlier_number++;
+        // score is negative inlier number! If less then better
+        return {inlier_number, -static_cast<double>(inlier_number)};
     }
 
     void setBestScore(double best_score_) override {
@@ -117,21 +126,21 @@ public:
             if (sum_errors - points_size + point > best_score)
                 break;
         }
-        return Score(inlier_number, sum_errors);
+        return {inlier_number, sum_errors};
     }
 
     Score getScore (const std::vector<float> &errors) const override {
-        double err, sum_errors = 0;
+        double sum_errors = 0;
         int inlier_number = 0;
         for (int point = 0; point < points_size; point++) {
-            err = errors[point];
+            const auto err = errors[point];
             if (err < norm_thr) {
                 sum_errors -= (1 - err * one_over_thr);
                 if (err < threshold)
                     inlier_number++;
             }
         }
-        return Score(inlier_number, sum_errors);
+        return {inlier_number, sum_errors};
     }
 
     void setBestScore(double best_score_) override {
@@ -273,7 +282,7 @@ public:
             if (total_loss - (points_size - point_idx) > previous_best_loss)
                 break;
         }
-        return Score(num_tentative_inliers, total_loss);
+        return {num_tentative_inliers, total_loss};
     }
 
     Score getScore (const std::vector<float> &errors) const override {
@@ -295,7 +304,7 @@ public:
             if (total_loss - (points_size - point_idx) > previous_best_loss)
                 break;
         }
-        return Score(num_tentative_inliers, total_loss);
+        return {num_tentative_inliers, total_loss};
     }
 
     void setBestScore (double best_loss) override {
@@ -339,7 +348,16 @@ public:
             if (errors[point] < threshold)
                 inlier_number++;
         // score is median of errors
-        return Score(inlier_number, Utils::findMedian (errors));
+        return {inlier_number, Utils::findMedian (errors)};
+    }
+    Score getScore (const std::vector<float> &errors_) const override {
+        std::vector<float> errors = errors_;
+        int inlier_number = 0;
+        for (int point = 0; point < points_size; point++)
+            if (errors[point] < threshold)
+                inlier_number++;
+        // score is median of errors
+        return {inlier_number, Utils::findMedian (errors)};
     }
 
     void setBestScore (double /*best_score*/) override {}
@@ -366,8 +384,6 @@ public:
     inline bool getScore(Score &/*score*/) const override { return false; }
     void update (int /*highest_inlier_number*/) override {}
     void updateSPRT (double , double , double , double , double , const Score &) override {}
-    const std::vector<float> &getErrors() const override { return errors; }
-    bool hasErrors () const override { return false; }
 };
 Ptr<ModelVerifier> ModelVerifier::create() {
     return makePtr<ModelVerifierImpl>();
@@ -384,8 +400,11 @@ private:
     // Let m_S be the number of models that are verified per sample
     const double inlier_threshold, norm_thr, one_over_thr;
 
+    // alpha is false negative rate, alpha = 1 / A
     double t_M, lowest_sum_errors, current_epsilon, current_delta, current_A,
-            delta_to_epsilon, complement_delta_to_complement_epsilon;
+        delta_to_epsilon, complement_delta_to_complement_epsilon,
+        time_ver_corr_sprt = 0, time_ver_corr = 0, m_S,
+        one_over_complement_alpha, C, avg_num_checked_pts;
 
     std::vector<SPRT_history> sprt_histories;
     std::vector<int> points_random_pool;
@@ -393,21 +412,13 @@ private:
 
     Score score;
     const ::vsac::ScoreMethod score_type;
-    bool do_sprt, last_model_is_good, can_compute_score, has_errors, adapt, IS_ADAPTIVE;
-
-    // alpha is false negative rate, alpha = 1 / A
-    double one_over_complement_alpha, C, avg_num_checked_pts, m_S;
-
-    double time_ver_corr_sprt = 0, time_ver_corr = 0, time_corr_ver_accumulator = 0;
-    int tested_models_for_time = 0, tested_points_for_time = 0;
-    std::chrono::time_point<std::chrono::steady_clock> start_time;
+    bool do_sprt, last_model_is_good, adapt, IS_ADAPTIVE;
 public:
     AdaptiveSPRTImpl (int state, const Ptr<Error> &err_, const Ptr<Quality> &quality_, int points_size_,
               double inlier_threshold_, double prob_pt_of_good_model, double prob_pt_of_bad_model,
               double time_sample, double avg_num_models, ::vsac::ScoreMethod score_type_, int max_iters_to_adapt_,
               double k_mlesac_, bool is_adaptive) : rng(state), err(err_),
-              quality(quality_),
-              points_size(points_size_), max_iters_to_adapt (max_iters_to_adapt_),
+              quality(quality_), points_size(points_size_), max_iters_to_adapt (max_iters_to_adapt_),
                 inlier_threshold (quality->getThreshold()), norm_thr(inlier_threshold_*k_mlesac_),
                 one_over_thr (1/norm_thr), t_M (time_sample), score_type (score_type_), m_S (avg_num_models) {
 
@@ -424,22 +435,20 @@ public:
         highest_inlier_number = 0;
         lowest_sum_errors = std::numeric_limits<double>::max();
         last_model_is_good = false;
-        can_compute_score = score_type_ == ::vsac::ScoreMethod::SCORE_METHOD_MSAC
-                         || score_type_ == ::vsac::ScoreMethod::SCORE_METHOD_RANSAC
-                         || score_type_ == ::vsac::ScoreMethod::SCORE_METHOD_LMEDS;
-        // for MSAC and RANSAC errors not needed
-        if (score_type_ != ::vsac::ScoreMethod::SCORE_METHOD_MSAC && score_type_ != ::vsac::ScoreMethod::SCORE_METHOD_RANSAC)
+        if (score_type_ != ::vsac::ScoreMethod::SCORE_METHOD_MSAC)
             errors = std::vector<float>(points_size_);
-        // however return errors only if we can't compute score
-        has_errors = !can_compute_score;
         IS_ADAPTIVE = is_adaptive;
         if (IS_ADAPTIVE) {
             adapt = true; do_sprt = false;
+            // all these variables will be initialized later
+            current_sprt_idx = 0; current_epsilon = prob_pt_of_good_model;
+            current_delta = prob_pt_of_bad_model; current_A = -1;
+            delta_to_epsilon = -1; C = -1; avg_num_checked_pts = points_size_;
+            one_over_complement_alpha = -1; complement_delta_to_complement_epsilon = -1;
         } else {
             adapt = false; do_sprt = true; max_iters_to_adapt = 0;
             createTest(prob_pt_of_good_model, prob_pt_of_bad_model);
         }
-        // current_sprt_idx = 0;
     }
 
     inline bool isModelGood (const Mat &model) override {
@@ -447,39 +456,54 @@ public:
         last_model_is_good = true;
         double sum_errors = 0;
         int tested_inliers = 0;
-        if (! do_sprt || adapt) {
-            if (can_compute_score) {
-                score = quality->getScore(model);
-            } else { errors = err->getErrors(model); }
+        if (! do_sprt || adapt) { // if adapt or not sprt then compute model score directly
+            score = quality->getScore(model);
             tested_inliers = score.inlier_number;
             sum_errors = score.score;
-        } else {
+        } else { // do sprt and not adapt
             err->setModelParameters(model);
             double lambda = 1;
             int random_pool_idx = rng.uniform(0, points_size), tested_point;
-            for (tested_point = 0; tested_point < points_size; tested_point++) {
-                if (random_pool_idx >= points_size)
-                    random_pool_idx = 0;
-                const float error = err->getError (points_random_pool[random_pool_idx++]);
-                if (error < inlier_threshold) {
-                    tested_inliers++;
-                    lambda *= delta_to_epsilon;
-                } else {
-                    lambda *= complement_delta_to_complement_epsilon;
-                    // since delta is always higher than epsilon, then lambda can increase only
-                    // when point is not consistent with model
-                    if (lambda > current_A)
-                        break;
-                }
-                if (score_type == ::vsac::ScoreMethod::SCORE_METHOD_MSAC) {
+            if (score_type == ::vsac::ScoreMethod::SCORE_METHOD_MSAC) {
+                for (tested_point = 0; tested_point < points_size; tested_point++) {
+                    if (random_pool_idx >= points_size)
+                        random_pool_idx = 0;
+                    const float error = err->getError (points_random_pool[random_pool_idx++]);
+                    if (error < inlier_threshold) {
+                        tested_inliers++;
+                        lambda *= delta_to_epsilon;
+                    } else {
+                        lambda *= complement_delta_to_complement_epsilon;
+                        // since delta is always higher than epsilon, then lambda can increase only
+                        // when point is not consistent with model
+                        if (lambda > current_A)
+                            break;
+                    }
                     if (error < norm_thr)
                         sum_errors -= (1 - error * one_over_thr);
                     if (sum_errors - points_size + tested_point > lowest_sum_errors)
                         break;
-                } else if (score_type == ::vsac::ScoreMethod::SCORE_METHOD_RANSAC) {
+                }
+            } else { // save errors into array here
+                for (tested_point = 0; tested_point < points_size; tested_point++) {
+                    if (random_pool_idx >= points_size)
+                        random_pool_idx = 0;
+                    const int pt = points_random_pool[random_pool_idx++];
+                    const float error = err->getError (pt);
+                    if (error < inlier_threshold) {
+                        tested_inliers++;
+                        lambda *= delta_to_epsilon;
+                    } else {
+                        lambda *= complement_delta_to_complement_epsilon;
+                        // since delta is always higher than epsilon, then lambda can increase only
+                        // when point is not consistent with model
+                        if (lambda > current_A)
+                            break;
+                    }
                     if (tested_inliers + points_size - tested_point < highest_inlier_number)
                         break;
-                } else errors[points_random_pool[random_pool_idx-1]] = error;
+                    errors[pt] = error;
+                }
             }
             last_model_is_good = tested_point == points_size;
         }
@@ -489,25 +513,25 @@ public:
         if (last_model_is_good) {
             if (do_sprt) {
                 score.inlier_number = tested_inliers;
-                if (score_type == ::vsac::ScoreMethod::SCORE_METHOD_MSAC) {
+                if (score_type == ::vsac::ScoreMethod::SCORE_METHOD_MSAC)
                     score.score = sum_errors;
-                    if (lowest_sum_errors > sum_errors)
-                        lowest_sum_errors = sum_errors;
-                } else if (score_type == ::vsac::ScoreMethod::SCORE_METHOD_RANSAC)
+                else if (score_type == ::vsac::ScoreMethod::SCORE_METHOD_RANSAC)
                     score.score = -static_cast<double>(tested_inliers);
-                else if (score_type == ::vsac::ScoreMethod::SCORE_METHOD_LMEDS)
-                    score.score = Utils::findMedian(errors);            }
+                else score = quality->getScore(errors);
+            }
             const double new_epsilon = static_cast<double>(tested_inliers) / points_size;
             if (new_epsilon > current_epsilon) {
                 highest_inlier_number = tested_inliers; // update max inlier number
                 createTest(new_epsilon, current_delta);
             }
+            if (lowest_sum_errors > sum_errors)
+                lowest_sum_errors = sum_errors;
         }
 #if DEBUG_ASPRT
         if (! last_model_is_good) {
             const auto m_score = quality->getScore(model);
             if (m_score.inlier_number > highest_inlier_number) {
-                std::cout << "MODEL WITH HIGHEST NUM OF INLIERS REJECTED (" << m_score.score << ", " << m_score.inlier_number << ") BEST " << highest_inlier_number << '\n';
+                std::cout << "MODEL WITH HIGHEST NUM OF INLIERS REJECTED (" << m_score.score << ", " << m_score.inlier_number << ") BEST " << highest_inlier_number << " FN ratio " << 1 / sprt_histories[current_sprt_idx].A << '\n';
             }
         }
 #endif
@@ -515,12 +539,10 @@ public:
     }
 
     inline bool getScore (Score &score_) const override {
-        if (!last_model_is_good || !can_compute_score)
-            return false;
         score_ = score;
         return true;
     }
-
+    // update SPRT parameters = called only once inside VSAC
     void updateSPRT (double time_model_est, double time_corr_ver, double new_avg_models, double new_delta, double new_epsilon, const Score &best_score) override {
         if (adapt) {
             adapt = false;
@@ -534,8 +556,6 @@ public:
         }
     }
 
-    bool hasErrors () const override { return has_errors; }
-    const std::vector<float> &getErrors () const override { return errors; }
     const std::vector<SPRT_history> &getSPRTvector () const override { return sprt_histories; }
     void update (int highest_inlier_number_) override {
         if (!adapt) {

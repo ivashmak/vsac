@@ -42,8 +42,6 @@ public:
          [  0   0   0   0 a55 a56 a57 a58 a59]
          [  0   0   0   0   0 a66 a67 a68 a69]
          [  0   0   0   0   0   0 a77 a78 a79]
-
-         f9 = 1
          */
         double f1[9], f2[9];
 
@@ -51,9 +49,9 @@ public:
         f1[7] = 0.;
         f1[6] = -a[6*n+8] / a[6*n+6];
 
-        f2[8] = 1.;
-        f2[7] = -a[6*n+8] / a[6*n+7];
-        f2[6] = 0.;
+        f2[8] = 0.;
+        f2[7] = -a[6*n+6] / a[6*n+7];
+        f2[6] = 1;
 
         // start from the last row
         for (int i = m-2; i >= 0; i--) {
@@ -66,11 +64,9 @@ public:
             f1[i] = acc1 / a[row_i + i];
             f2[i] = acc2 / a[row_i + i];
 
-            // due to numerical errors return 0 solutions
             if (std::isnan(f1[i]) || std::isnan(f2[i]))
-                return 0;
+                return 0; // due to numerical errors return 0 solutions
         }
-
         // OpenCV:
         double c[4], r[3];
         double t0 = 0, t1 = 0, t2 = 0;
@@ -170,7 +166,7 @@ public:
         }
 
         Mat U, Vt, D;
-        cv::Mat_<double> A(7,9, &a[0]);
+        cv::Matx<double, 7, 9> A(&a[0]);
         SVD::compute(A, D, U, Vt, SVD::FULL_UV+SVD::MODIFY_A);
 
         double * f1 = (double *) Vt.row(8).data, * f2 = (double *) Vt.row(7).data;
@@ -246,7 +242,6 @@ Ptr<FundamentalSVDSolver> FundamentalSVDSolver::create(const Mat &points_) {
     return makePtr<FundamentalSVDSolverImpl>(points_);
 }
 
-
 class FundamentalMinimalSolver8ptsImpl : public FundamentalMinimalSolver8pts {
 private:
     const Mat * points_mat;
@@ -254,9 +249,7 @@ private:
 public:
     explicit FundamentalMinimalSolver8ptsImpl (const Mat &points_) :
             points_mat (&points_), points ((float*) points_.data)
-    {
-        CV_DbgAssert(points);
-    }
+    { CV_DbgAssert(points); }
 
     int estimate (const std::vector<int> &sample, std::vector<Mat> &models) const override {
         const int m = 8, n = 9; // rows, cols
@@ -324,15 +317,22 @@ Ptr<FundamentalMinimalSolver8pts> FundamentalMinimalSolver8pts::create(const Mat
     return makePtr<FundamentalMinimalSolver8ptsImpl>(points_);
 }
 
-class FundamentalNonMinimalSolverImpl : public FundamentalNonMinimalSolver {
+class EpipolarNonMinimalSolverImpl : public EpipolarNonMinimalSolver {
 private:
     const Mat * points_mat;
-    const Ptr<NormTransform> normTr;
-    bool norm_in_advance, enforce_rank = true;
+    Matx33d _T1, _T2;
+    Ptr<NormTransform> normTr = nullptr;
+    bool enforce_rank = true, is_fundamental;
 public:
-    explicit FundamentalNonMinimalSolverImpl (const Mat &points_, bool norm_in_advance_) :
-        points_mat(&points_), normTr (NormTransform::create(points_)) {
-        norm_in_advance = norm_in_advance_;
+    explicit EpipolarNonMinimalSolverImpl (const Mat &points_, const Matx33d &T1, const Matx33d &T2)
+        : points_mat(&points_), _T1(T1), _T2(T2) {
+        is_fundamental = true;
+    }
+    explicit EpipolarNonMinimalSolverImpl (const Mat &points_, bool is_fundamental_) :
+        points_mat(&points_) {
+        is_fundamental = is_fundamental_;
+        if (is_fundamental)
+            normTr = NormTransform::create(points_);
     }
     void enforceRankConstraint (bool enforce) override { enforce_rank = enforce; }
     int estimate (const std::vector<int> &sample, int sample_size, std::vector<Mat>
@@ -342,8 +342,9 @@ public:
 
         Matx33d T1, T2;
         Mat norm_points;
-        normTr->getNormTransformation(norm_points, sample, sample_size, T1, T2);
-        const auto * const norm_pts = (float *) norm_points.data;
+        if (normTr)
+            normTr->getNormTransformation(norm_points, sample, sample_size, T1, T2);
+        const auto * const norm_pts = normTr ? (float *) norm_points.data : (float *) points_mat->data;
 
         // ------- 8 points algorithm with Eigen and covariance matrix --------------
         double a[9] = {0, 0, 0, 0, 0, 0, 0, 0, 1}, AtA[81] = {0}; // 9x9
@@ -411,22 +412,29 @@ public:
         models = std::vector<Mat> { Mat_<double>(3, 3, Vt.val + 72 /*=8*9*/) };
 #endif
         if (enforce_rank)
-            FundamentalDegeneracy::recoverRank(models[0], true/*F*/);
-        const auto * const t1 = T1.val, * const t2 = T2.val, * const f = (double *) models[0].data;
+            FundamentalDegeneracy::recoverRank(models[0], is_fundamental);
+        if (is_fundamental) {
+            const auto * const f = (double *) models[0].data;
+            auto * t1 = normTr ? T1.val : _T1.val, * t2 = normTr ? T2.val : _T2.val;
 
-        // F = T2^T F T1
-        models[0] = Mat(Matx33d(t1[0]*t2[0]*f[0],t1[0]*t2[0]*f[1], t2[0]*f[2] + t2[0]*f[0]*t1[2] +
-            t2[0]*f[1]*t1[5], t1[0]*t2[0]*f[3],t1[0]*t2[0]*f[4], t2[0]*f[5] + t2[0]*f[3]*t1[2] +
-            t2[0]*f[4]*t1[5], t1[0]*(f[6] + f[0]*t2[2] + f[3]*t2[5]), t1[0]*(f[7] + f[1]*t2[2] +
-            f[4]*t2[5]), f[8] + t1[2]*(f[6] + f[0]*t2[2] + f[3]*t2[5]) + t1[5]*(f[7] + f[1]*t2[2] +
-            f[4]*t2[5]) + f[2]*t2[2] + f[5]*t2[5]));
+            // F = T2^T F T1
+            models[0] = Mat(Matx33d(t1[0]*t2[0]*f[0],t1[0]*t2[0]*f[1], t2[0]*f[2] + t2[0]*f[0]*t1[2] +
+                t2[0]*f[1]*t1[5], t1[0]*t2[0]*f[3],t1[0]*t2[0]*f[4], t2[0]*f[5] + t2[0]*f[3]*t1[2] +
+                t2[0]*f[4]*t1[5], t1[0]*(f[6] + f[0]*t2[2] + f[3]*t2[5]), t1[0]*(f[7] + f[1]*t2[2] +
+                f[4]*t2[5]), f[8] + t1[2]*(f[6] + f[0]*t2[2] + f[3]*t2[5]) + t1[5]*(f[7] + f[1]*t2[2] +
+                f[4]*t2[5]) + f[2]*t2[2] + f[5]*t2[5]));
+        }
         return 1;
     }
 
     int getMinimumRequiredSampleSize() const override { return 8; }
     int getMaxNumberOfSolutions () const override { return 1; }
 };
-Ptr<FundamentalNonMinimalSolver> FundamentalNonMinimalSolver::create(const Mat &points_, bool norm_in_advance) {
-    return makePtr<FundamentalNonMinimalSolverImpl>(points_, norm_in_advance);
+Ptr<EpipolarNonMinimalSolver> EpipolarNonMinimalSolver::create(const Mat &points_, bool is_fundamental) {
+    return makePtr<EpipolarNonMinimalSolverImpl>(points_, is_fundamental);
 }
+Ptr<EpipolarNonMinimalSolver> EpipolarNonMinimalSolver::create(const Mat &points_, const Matx33d &T1, const Matx33d &T2) {
+    return makePtr<EpipolarNonMinimalSolverImpl>(points_, T1, T2);
+}
+
 }}

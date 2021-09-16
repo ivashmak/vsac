@@ -2,6 +2,28 @@
 #include <opencv2/flann/miniflann.hpp>
 
 namespace cv { namespace vsac {
+int mergePoints (InputArray pts1_, InputArray pts2_, Mat &pts, bool ispnp) {
+    Mat pts1 = pts1_.getMat(), pts2 = pts2_.getMat();
+    auto convertPoints = [] (Mat &points, int pt_dim) {
+        points.convertTo(points, CV_32F); // convert points to have float precision
+        if (points.channels() > 1)
+            points = points.reshape(1, (int)points.total()); // convert point to have 1 channel
+        if (points.rows < points.cols)
+            transpose(points, points); // transpose so points will be in rows
+        CV_CheckGE(points.cols, pt_dim, "Invalid dimension of point");
+        if (points.cols != pt_dim) // in case when image points are 3D convert them to 2D
+            points = points.colRange(0, pt_dim);
+    };
+
+    convertPoints(pts1, 2); // pts1 are always image points
+    convertPoints(pts2, ispnp ? 3 : 2); // for PnP points are 3D
+
+    // points are of size [Nx2 Nx2] = Nx4 for H, F, E
+    // points are of size [Nx2 Nx3] = Nx5 for PnP
+    hconcat(pts1, pts2, pts);
+    return pts.rows;
+}
+
 double Utils::getCalibratedThreshold (double threshold, const Mat &K1, const Mat &K2) {
     const auto * const k1 = (double *) K1.data, * const k2 = (double *) K2.data;
     return threshold / ((k1[0] + k1[4] + k2[0] + k2[4]) / 4.0);
@@ -150,9 +172,9 @@ void Utils::densitySort (const Mat &points, int knn, Mat &sorted_points, std::ve
 }
 
 Matx33d Math::getSkewSymmetric(const Vec3d &v) {
-     return Matx33d(0,    -v[2], v[1],
-                   v[2],  0,    -v[0],
-                  -v[1],  v[0], 0);
+     return {0,    -v[2], v[1],
+             v[2],  0,   -v[0],
+            -v[1],  v[0], 0};
 }
 
 Matx33d Math::rotVec2RotMat (const Vec3d &v) {
@@ -160,9 +182,9 @@ Matx33d Math::rotVec2RotMat (const Vec3d &v) {
     const double x = v[0] / phi, y = v[1] / phi, z = v[2] / phi;
     const double a = sin(phi), b = cos(phi);
     // R = I + sin(phi) * skew(v) + (1 - cos(phi) * skew(v)^2
-    return Matx33d((b - 1)*y*y + (b - 1)*z*z + 1, -a*z - x*y*(b - 1), a*y - x*z*(b - 1),
+    return {(b - 1)*y*y + (b - 1)*z*z + 1, -a*z - x*y*(b - 1), a*y - x*z*(b - 1),
      a*z - x*y*(b - 1), (b - 1)*x*x + (b - 1)*z*z + 1, -a*x - y*z*(b - 1),
-    -a*y - x*z*(b - 1), a*x - y*z*(b - 1), (b - 1)*x*x + (b - 1)*y*y + 1);
+    -a*y - x*z*(b - 1), a*x - y*z*(b - 1), (b - 1)*x*x + (b - 1)*y*y + 1};
 }
 
 Vec3d Math::rotMat2RotVec (const Matx33d &R) {
@@ -211,10 +233,8 @@ bool Math::eliminateUpperTriangular (std::vector<double> &a, int m, int n) {
             }
 
         // if pivot value is 0 continue
-        if (fabs(pivot) < DBL_EPSILON) {
+        if (fabs(pivot) < DBL_EPSILON)
             continue;
-            // return false; // matrix is not full rank -> terminate
-        }
 
         // swap row with maximum pivot value with current row
         for (int c = r; c < n; c++)
@@ -254,128 +274,6 @@ double Utils::getPoissonCDF (double lambda, int inliers) {
     return cdf;
 }
 
-// OpenCV:
-double oppositeOfMinor(const Matx33d& M, const int row, const int col);
-int signd (double x);
-void findRmatFrom_tstar_n(const Matx33d &Hnorm, const cv::Vec3d& tstar, const cv::Vec3d& n, const double v, cv::Matx33d& R);
-
-// OpenCV:
-double oppositeOfMinor(const Matx33d& M, const int row, const int col) {
-    const int x1 = col == 0 ? 1 : 0, x2 = col == 2 ? 1 : 2;
-    const int y1 = row == 0 ? 1 : 0, y2 = row == 2 ? 1 : 2;
-    return (M(y1, x2) * M(y2, x1) - M(y1, x1) * M(y2, x2));
-}
-int signd (double x) {
-    return x >= 0 ? 1 : -1;
-}
-void findRmatFrom_tstar_n(const Matx33d &Hnorm, const cv::Vec3d& tstar, const cv::Vec3d& n, const double v, cv::Matx33d& R) {
-    R = Hnorm * (Matx33d::eye() - (2/v) * Matx31d(tstar) *  Matx31d(n).t());
-    if (determinant(R) < 0)
-        R *= -1;
-}
-void Utils::getClosePoints (const cv::Mat &points, std::vector<std::vector<int>> &close_points, double close_thr_sqr) {
-    const auto close_thr = sqrtf((float)close_thr_sqr);
-    const auto graph = cv::vsac::GridNeighborhoodGraph2::create(points, points.rows, close_thr, close_thr, close_thr, close_thr);
-    close_points = graph->getGraph();
-}
-/*
- * Hnorm = K2^-1 H K1 -- normalized homography
- */
-int Utils::decomposeHomography (const Matx33d &Hnorm_, std::vector<Matx33d> &R, std::vector<Vec3d> &t) {
-    // remove scale
-    Vec3d w;
-    SVD::compute(Hnorm_, w);
-    Matx33d Hnorm = Hnorm_ * (1/w(1));
-
-    const double epsilon = 0.003;
-    //S = H'H - I
-    Matx33d S = Hnorm.t() * Hnorm;
-    S(0, 0) -= 1.0;
-    S(1, 1) -= 1.0;
-    S(2, 2) -= 1.0;
-
-    // std::cout << "norm error " << norm(S, NORM_INF) << "\n";
-    //check if H is rotation matrix
-    if (norm(S, NORM_INF) < epsilon) {
-        R = std::vector<Matx33d> { Hnorm };
-        t = std::vector<Vec3d> { Vec3d(0,0,0) };
-        return 1;
-    }
-
-    //! Compute nvectors
-    const double M00 = oppositeOfMinor(S, 0, 0);
-    const double M11 = oppositeOfMinor(S, 1, 1);
-    const double M22 = oppositeOfMinor(S, 2, 2);
-
-    const double rtM00 = sqrt(M00);
-    const double rtM11 = sqrt(M11);
-    const double rtM22 = sqrt(M22);
-
-    const double M01 = oppositeOfMinor(S, 0, 1);
-    const double M12 = oppositeOfMinor(S, 1, 2);
-    const double M02 = oppositeOfMinor(S, 0, 2);
-
-    const int e12 = signd(M12);
-    const int e02 = signd(M02);
-    const int e01 = signd(M01);
-
-    const double nS00 = abs(S(0, 0));
-    const double nS11 = abs(S(1, 1));
-    const double nS22 = abs(S(2, 2));
-
-    //find max( |Sii| ), i=0, 1, 2
-    int indx = 0;
-    if (nS00 < nS11){
-        indx = 1;
-        if( nS11 < nS22 )
-            indx = 2;
-    } else {
-        if(nS00 < nS22 )
-            indx = 2;
-    }
-
-    Vec3d npa, npb;
-    switch (indx) {
-        case 0:
-            npa[0] = S(0, 0),               npb[0] = S(0, 0);
-            npa[1] = S(0, 1) + rtM22,       npb[1] = S(0, 1) - rtM22;
-            npa[2] = S(0, 2) + e12 * rtM11, npb[2] = S(0, 2) - e12 * rtM11;
-            break;
-        case 1:
-            npa[0] = S(0, 1) + rtM22,       npb[0] = S(0, 1) - rtM22;
-            npa[1] = S(1, 1),               npb[1] = S(1, 1);
-            npa[2] = S(1, 2) - e02 * rtM00, npb[2] = S(1, 2) + e02 * rtM00;
-            break;
-        case 2:
-            npa[0] = S(0, 2) + e01 * rtM11, npb[0] = S(0, 2) - e01 * rtM11;
-            npa[1] = S(1, 2) + rtM00,       npb[1] = S(1, 2) - rtM00;
-            npa[2] = S(2, 2),               npb[2] = S(2, 2);
-            break;
-        default:
-            break;
-    }
-
-    const double traceS = S(0, 0) + S(1, 1) + S(2, 2);
-    const double v = 2.0 * sqrt(1 + traceS - M00 - M11 - M22);
-    const double n_t = sqrt(2 + traceS - v);
-    const double half_nt = 0.5 * n_t;
-    const double esii_t_r = signd(S(indx, indx)) * sqrt(2 + traceS + v);
-
-    const Vec3d na = npa / norm(npa);
-    const Vec3d nb = npb / norm(npb);
-
-    const Vec3d ta_star = half_nt * (esii_t_r * nb - n_t * na);
-    const Vec3d tb_star = half_nt * (esii_t_r * na - n_t * nb);
-
-    //Ra=R1, ta=t1, na
-    Matx33d R1, R2;
-    findRmatFrom_tstar_n(Hnorm, ta_star, na, v, R1);
-    //Rb=R2, tb=t2, nb
-    findRmatFrom_tstar_n(Hnorm, tb_star, nb, v, R2);
-    R = {R1, R2};
-    t = {R1 * ta_star, R2 * tb_star};
-    return 2;
-}
 int Utils::triangulatePointsRt (const Mat &points, Mat &points3D, const Mat &K1_, const Mat &K2_, 
         const cv::Mat &R, const cv::Mat &t_vec, std::vector<bool> &good_mask, std::vector<double> &depths1, std::vector<double> &depths2) {
     cv::Matx33d K1 = Matx33d(K1_), K2 = Matx33d(K2_);
@@ -407,13 +305,8 @@ int Utils::triangulatePointsRt (const Mat &points, Mat &points3D, const Mat &K1_
         cv::SVDecomp(A, D, U, Vt);
         const double scale1 = Vt(5,0) / Vt(5,5), scale2 = Vt(5,1) / Vt(5,5);
             
-        // cv::Vec4d X;
-        // cv::Vec2d pt1(pts[4*i],pts[4*i+1]), pt2(pts[4*i+2],pts[4*i+3]);
-        // cv::triangulatePoints(P1, P2[p], pt1, pt2, X);
-        // const auto x1 = P1 * X, x2 = P2[p] * X;
         // since P1 = K [I | 0] it imples that if scale1 < 0 then z < 0
         if (scale1 > 0 && scale2 > 0) {
-            // std::cout << "good pt " << i << " scales " << scale1 << " " << scale2 << '\n';
             good_mask[i] = true;
             pts3D_ptr[i*3  ] = Vt(5,2) / Vt(5,5);
             pts3D_ptr[i*3+1] = Vt(5,3) / Vt(5,5);
@@ -448,129 +341,145 @@ void Utils::triangulatePoints (const Mat &points, const Mat &E, const Mat &K1_, 
             correct_idx = p;
         }
 
-    if (correct_idx <= 1)
-         R = Mat(R1);
-    else R = Mat(R2);
-    if (correct_idx % 2)
-         t_vec = Mat(-t);
-    else t_vec = Mat( t);
+    R = correct_idx <= 1 ? Mat(R1) : Mat(R2);
+    // 0 and 2 index corresponds to +t, 1 and 3 to -t
+    t_vec = correct_idx % 2 ? Mat(-t) : Mat(t);
     pts3D[correct_idx].copyTo(points3D);
     good_mask = good_masks[correct_idx];
     depths1 = depths1_[correct_idx];
     depths2 = depths2_[correct_idx];
 }
 
-void Utils::triangulatePoints (bool calibrated, const Mat &points, const Mat &E_, Mat &new_points, Mat &points3D, Mat &R) {
-    /*
-     * S = (1 0 0)
-     *      0 1 0)
-     */
-    auto sgn = [] (const double v) {
-        return (0 < v) - (v < 0);
-    };
+// https://www.researchgate.net/publication/221362655_Triangulation_Made_Easy
+void Utils::triangulatePoints (const Mat &F_, const Mat &points1, const Mat &points2, Mat &corr_points1, Mat &corr_points2,
+        const Mat &K1_, const Mat &K2_, Mat &points3D, Mat &R, Mat &t_out, const std::vector<bool> &good_point_mask) {
+    cv::Mat pts1_ = points1, pts2_ = points2;
+    pts1_.convertTo(pts1_, CV_32F);
+    pts2_.convertTo(pts2_, CV_32F);
+    corr_points1 = Mat_<float>::zeros(points1.rows, 2);
+    corr_points2 = Mat_<float>::zeros(points1.rows, 2);
 
-    new_points = Mat(points.rows, points.cols, points.type());
-    int num_pts_positive_depth[2] = {0};
-
+    int correct_pose_pair = -1, num_pts_processed = 0;
+    int num_pts_positive_depth[4] = {0};
     cv::Mat points3D_R1, points3D_R2;
-    float * pts3D_R1, * pts3D_R2;
-    if (calibrated) {
-        points3D_R1 = Mat_<float>(points.rows, 3);
-        points3D_R2 = Mat_<float>(points.rows, 3);
-        pts3D_R1 = (float *) points3D_R1.data;
-        pts3D_R2 = (float *) points3D_R2.data;
+    Vec3d t_, t_corr;
+    Matx33d R1, R2, F (F_), K1(K1_), K2(K2_), R_corr, K1_inv, K2_inv, E;
+    const bool has_calibration = !K1_.empty() && !K2_.empty();
+    if (has_calibration) {
+        K2_inv = K2.inv();
+        K1_inv = K1.inv();
+        E = K2.t() * F * K1;
+        points3D_R1 = Mat_<float>::zeros(points1.rows, 3);
+        points3D_R2 = Mat_<float>::zeros(points1.rows, 3);
+        decomposeEssentialMat(E, R1, R2, t_);
     }
-    auto * new_pts = (float *) new_points.data;
+    F = F.t();
+    auto * pts3D_R1 = (float *) points3D_R1.data, * pts3D_R2 = (float *) points3D_R2.data;
+    const auto * const pts1 = (float *) points1.data, * const pts2 = (float *) points2.data;
+    auto * cpts1 = (float *) corr_points1.data, * cpts2 = (float *) corr_points2.data;
 
-    Vec3d t;
-    Matx33d R1, R2, E (E_);
-    if (calibrated)
-        decomposeEssentialMat(E_, R1, R2, t);
-    E = E.t();
-    const Matx23d S (1, 0, 0, 0, 1, 0);
+    const Matx23d S (1, 0, 0,
+                     0, 1, 0);
     const Matx32d St = S.t();
-    const Matx23d SE = S * E, SEt = S * E.t();
-    const Matx22d SESt = S * E * St;
-    const auto * const pts = (float *) points.data;
-
-    for (int pt = 0; pt < points.rows; pt++) {
-        Vec3d x (pts[4*pt], pts[4*pt+1], 1);
-        Vec3d xp (pts[4*pt+2], pts[4*pt+3], 1);
-
-       // std::cout << "before " << (xp.t() * E * x) << " " << (x.t() * E * xp) << " x " << x << " xp " << xp << "\n";
-
-//        Vec3d xp (pts[4*pt], pts[4*pt+1], 1);
-//        Vec3d x (pts[4*pt+2], pts[4*pt+3], 1);
-
-        auto n = SE * xp, np = SEt * x;
-//        const auto a = (n[0] * SESt(0,0) + n[1] * SESt(1,0)) * np[0] +
-//                       (n[0] * SESt(0,1) + n[1] * SESt(1,1)) * np[1];
-        const auto a = (Vec2d(Mat(n.t() * SESt))).dot(np);
+    const Matx23d SF = S * F, SFt = S * F.t();
+    const Matx22d SFSt = S * F * St;
+    for (int pt = 0; pt < points1.rows; pt++) {
+        if (!good_point_mask[pt]) continue;
+        const int idx = 2*pt;
+        Vec3d x  (pts1[idx], pts1[idx+1], 1);
+        Vec3d xp (pts2[idx], pts2[idx+1], 1);
+        Vec2d n = SF * xp, np = SFt * x;
+        // n^T SES^T n'
+        const auto a = (n[0] * SFSt(0,0) + n[1] * SFSt(1,0)) * np[0] +
+                       (n[0] * SFSt(0,1) + n[1] * SFSt(1,1)) * np[1];
         const auto b = 0.5 * (n.dot(n) + np.dot(np));
-//        const auto c = (x[0] * E(0,0) + x[1] * E(1,0) + E(2,0)) * xp[0] +
-//                       (x[0] * E(0,1) + x[1] * E(1,1) + E(2,1)) * xp[1] +
-//                       (x[0] * E(0,2) + x[1] * E(1,2) + E(2,2)); // xT E x
-        const auto c = (Vec3d(Mat(x.t() * E))).dot(xp);
+        const auto c = (x[0] * F(0,0) + x[1] * F(1,0) + F(2,0)) * xp[0] +
+                       (x[0] * F(0,1) + x[1] * F(1,1) + F(2,1)) * xp[1] +
+                       (x[0] * F(0,2) + x[1] * F(1,2) + F(2,2)); // xT E x
         auto lambda = c / (b + sqrt(b*b - a * c));
         auto dx = lambda * n;
         auto dxp = lambda * np;
-        n -= SESt * dxp;
-        np -= SESt.t() * dx;
+        n -= SFSt * dxp;
+        np -= SFSt.t() * dx;
 
         // niter1
         dx = dx.dot(n) * n / n.dot(n);
         dxp = dxp.dot(np) * np / np.dot(np);
 
         // niter2
-//        lambda = lambda * 2 * d /(n.dot(n) + np.dot(np));
-//        dx = lambda * n;
-//        dxp = lambda * np;
+        // lambda = lambda * 2 * d /(n.dot(n) + np.dot(np));
+        // dx = lambda * n;
+        // dxp = lambda * np;
 
         x -= St * dx;
         xp -= St * dxp;
 
-       // std::cout << "after " << (xp.t() * E * x) << " " << (x.t() * E * xp) << " x " << x << " xp " << xp << "\n";
-//        continue;
+        (*cpts1++) = x[0];
+        (*cpts1++) = x[1];
+        (*cpts2++) = xp[0];
+        (*cpts2++) = xp[1];
 
-        (*new_pts++) = x[0];
-        (*new_pts++) = x[1];
-        (*new_pts++) = xp[0];
-        (*new_pts++) = xp[1];
-//        std::cout << points.row(pt) << " vs " << new_points.row(pt) << "\n";
-
-        if (calibrated) {
-            const Vec3d z1 = x.cross(R1 * xp);
-            const Vec3d z2 = x.cross(R2 * xp);
-            const Vec3d X1 = (Vec3d(Mat(z1.t() * E))).dot(xp) * x / (z1.dot(z1));
-            const Vec3d X2 = (Vec3d(Mat(z2.t() * E))).dot(xp) * x / (z2.dot(z2));
-            (*pts3D_R1++) = X1[0];
-            (*pts3D_R1++) = X1[1];
-            (*pts3D_R1++) = X1[2];
-            (*pts3D_R2++) = X2[0];
-            (*pts3D_R2++) = X2[1];
-            (*pts3D_R2++) = X2[2];
-            if (X1[2] > 0) {
-                num_pts_positive_depth[0]++;
-                // pts3D_R1[3*pt  ] = X1[0];
-                // pts3D_R1[3*pt+1] = X1[1];
-                // pts3D_R1[3*pt+2] = X1[2];
+        if (has_calibration) {
+            num_pts_processed++;
+            x[2] = 1; xp[2] = 1;
+            // get normalized points by K^-1 x
+            cv::Vec3d norm_x1 = K1_inv * x, norm_x2 = K2_inv * xp;
+            cv::Vec3d norm_x1_unit = norm_x1 / norm(norm_x1), norm_x2_unit = norm_x2 / norm(norm_x2);
+            if (correct_pose_pair != -1) {
+                // we found correct pose
+                const Vec3d z = norm_x1.cross(R_corr * norm_x2);
+                const Vec3d X = z.dot(E * norm_x2) * x / (z.dot(z));
+                pts3D_R1[3*pt  ] = X[0];
+                pts3D_R1[3*pt+1] = X[1];
+                pts3D_R1[3*pt+2] = X[2];
+            } else {
+                const bool R1_t_good     = Utils::satisfyCheirality(R1, t_, norm_x1_unit, norm_x2_unit);
+                const bool R1_min_t_good = Utils::satisfyCheirality(R1,-t_, norm_x1_unit, norm_x2_unit);
+                const bool R2_t_good     = Utils::satisfyCheirality(R2, t_, norm_x1_unit, norm_x2_unit);
+                const bool R2_min_t_good = Utils::satisfyCheirality(R2,-t_, norm_x1_unit, norm_x2_unit);
+                if (R1_t_good)     num_pts_positive_depth[0]++;
+                if (R1_min_t_good) num_pts_positive_depth[1]++;
+                if (R2_t_good)     num_pts_positive_depth[2]++;
+                if (R2_min_t_good) num_pts_positive_depth[3]++;
+                if (R1_t_good || R1_min_t_good) {
+                    const Vec3d z = norm_x1.cross(R1 * norm_x2);
+                    const Vec3d X = z.dot(E * norm_x2) * x / (z.dot(z));
+                    pts3D_R1[3*pt  ] = X[0];
+                    pts3D_R1[3*pt+1] = X[1];
+                    pts3D_R1[3*pt+2] = X[2];
+                } else {
+                    const Vec3d z = norm_x1.cross(R2 * norm_x2);
+                    const Vec3d X = z.dot(E * norm_x2) * x / (z.dot(z));
+                    pts3D_R2[3*pt  ] = X[0];
+                    pts3D_R2[3*pt+1] = X[1];
+                    pts3D_R2[3*pt+2] = X[2];
+                }
             }
-            if (X2[2] > 0) {
-                num_pts_positive_depth[1]++;
-                // pts3D_R2[3*pt  ] = X2[0];
-                // pts3D_R2[3*pt+1] = X2[1];
-                // pts3D_R2[3*pt+2] = X2[2];
+            if (num_pts_processed == 100 || num_pts_processed == points1.rows) {
+                // 100 points is enough to find out good pose pair
+                int max_points_in_front = 0;
+                for (int cam = 0; cam < 4; cam++) {
+                    if (max_points_in_front < num_pts_positive_depth[cam]) {
+                        max_points_in_front = num_pts_positive_depth[cam];
+                        correct_pose_pair = cam;
+                    }
+                }
+                t_corr = correct_pose_pair % 2 ? -t_ : t_;
+                if (correct_pose_pair >= 2) {
+                    R_corr = R2;
+                    // we store correct points in points3D_R1 array, so
+                    // copy all elements of points3D_R2.
+                    std::copy((float *)points3D_R2.data, (float *)points3D_R2.data+3*pt, (float *)points3D_R1.data);
+                } else R_corr = R1;
             }
-            // std::cout << X1 << " " << X2 << "\n";
         }
     }
-    if (num_pts_positive_depth[0] > num_pts_positive_depth[1]) {
-        R = Mat(R1);
-        points3D_R1.copyTo(points3D);
-    } else {
-        R = Mat(R2);
-        points3D_R2.copyTo(points3D);
-    }
+    R = Mat(R_corr);
+    t_out = Mat(t_corr);
+    points3D_R1.copyTo(points3D);
+    points3D.convertTo(points3D, points1.type());
+    corr_points1.convertTo(corr_points1, points1.type());
+    corr_points2.convertTo(corr_points2, points2.type());
 }
 
 //////////////////////////////////////// RANDOM GENERATOR /////////////////////////////
@@ -588,15 +497,12 @@ public:
         max_range = max_range_;
         subset = std::vector<int>(subset_size_);
     }
-
     int getRandomNumber () override {
         return rng.uniform(0, max_range);
     }
-
     int getRandomNumber (int max_rng) override {
         return rng.uniform(0, max_rng);
     }
-
     // closed range
     void resetGenerator (int max_range_) override {
         CV_CheckGE(0, max_range_, "max range must be greater than 0");
@@ -622,7 +528,6 @@ public:
     // interval is <0; max_range)
     void generateUniqueRandomSet (std::vector<int>& sample, int max_range_) override {
         /*
-         * necessary condition:
          * if subset size is bigger than range then array cannot be unique,
          * so function has infinite loop.
          */
@@ -714,19 +619,17 @@ float Utils::findMedian (std::vector<float> &array) {
     } else {
         // even: return average
         return (quicksort_median(array, length/2  , 0, length-1) +
-                quicksort_median(array, length/2+1, 0, length-1))/2;
+                quicksort_median(array, length/2+1, 0, length-1))*.5f;
     }
 }
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////// Radius Search Graph /////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////////////////
 class RadiusSearchNeighborhoodGraphImpl : public RadiusSearchNeighborhoodGraph {
 private:
     std::vector<std::vector<int>> graph;
 public:
     RadiusSearchNeighborhoodGraphImpl (const Mat &container_, int points_size,
-                               double radius, int flann_search_params, int num_kd_trees) {
+               double radius, int flann_search_params, int num_kd_trees) {
         // Radius search OpenCV works only with float data
         CV_Assert(container_.type() == CV_32F);
 
@@ -762,9 +665,7 @@ Ptr<RadiusSearchNeighborhoodGraph> RadiusSearchNeighborhoodGraph::create (const 
             flann_search_params, num_kd_trees);
 }
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////// FLANN Graph /////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////////////////
 class FlannNeighborhoodGraphImpl : public FlannNeighborhoodGraph {
 private:
     std::vector<std::vector<int>> graph;
@@ -816,9 +717,7 @@ Ptr<FlannNeighborhoodGraph> FlannNeighborhoodGraph::create(const Mat &points,
         k_nearest_neighbors_, get_distances, flann_search_params_, num_kd_trees);
 }
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////// Grid Neighborhood Graph /////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////////////////
 class GridNeighborhoodGraphImpl : public GridNeighborhoodGraph {
 private:
     // This struct is used for the nearest neighbors search by griding two images.
@@ -945,15 +844,12 @@ public:
         //--------- create a graph ----------
         graph = std::vector<std::vector<int>>(points_size);
 
-//        std::cout << points_size << " " <<  cell_size_x_img1 << " cell size \n";
         // store neighbors cells into graph (2D vector)
         for (const auto &cell : neighbors_map1) {
             const int neighbors_in_cell = static_cast<int>(cell.second.size());
-//            std::cout << "1) neighbors_in_cell " << neighbors_in_cell << "\n";
             // only one point in cell -> no neighbors
             if (neighbors_in_cell < 2) continue;
 
-//            std::cout << neighbors_in_cell << " neighbors\n";
             const std::vector<int> &neighbors = cell.second;
             // ---------- fill graph -----
             for (int v_in_cell : neighbors) {
@@ -970,7 +866,6 @@ public:
 
         // store neighbors cells into graph (2D vector)
         for (const auto &cell : neighbors_map2) {
-//            std::cout << "2) neighbors_in_cell " << cell.second.size() << "\n";
             if (cell.second.size() < 2) continue;
             const std::vector<int> &neighbors = cell.second;
             // ---------- fill graph -----
@@ -1000,15 +895,68 @@ Ptr<GridNeighborhoodGraph2> GridNeighborhoodGraph2::create(const Mat &points,
 }}
 
 namespace vsac {
-bool getCorrectedPointsHomography(const cv::Mat &points, cv::Mat &corr_points, const cv::Mat &H) {
-    std::vector<bool> mask(points.rows, true);
-    return getCorrectedPointsHomography(points, corr_points, H, mask);
+void triangulatePointsLindstrom (const cv::Mat &F, const cv::Mat &points1, const cv::Mat &points2, cv::Mat &points1_corr,
+        cv::Mat &points2_corr, const std::vector<bool> &good_point_mask) {
+    cv::Mat temp;
+    cv::vsac::Utils::triangulatePoints(F, points1, points2, points1_corr, points2_corr, temp, temp, temp, temp, temp, good_point_mask);
+}
+void triangulatePointsLindstrom (const cv::Mat &E, const cv::Mat &points1, const cv::Mat &points2, cv::Mat &points1_corr,
+        cv::Mat &points2_corr, const cv::Mat &K1, const cv::Mat &K2, cv::Mat &points3D, cv::Mat &R, cv::Mat &t, const std::vector<bool> &good_point_mask) {
+    cv::vsac::Utils::triangulatePoints(E, points1, points2, points1_corr, points2_corr, K1, K2, points3D, R, t, good_point_mask);
 }
 
+bool getCorrectedPointsHomography(const cv::Mat &points1, const cv::Mat &points2, cv::Mat &corr_points1, cv::Mat &corr_points2, const cv::Mat &H, const std::vector<bool> &mask) {
+    cv::Mat pts1 = points1, pts2 = points2;
+    pts1.convertTo(pts1, CV_32F);
+    pts2.convertTo(pts2, CV_32F);
+    const auto * const p1 = (float *) pts1.data;
+    const auto * const p2 = (float *) pts2.data;
+    corr_points1 = cv::Mat_<float>::zeros(points1.rows, 2);
+    corr_points2 = cv::Mat_<float>::zeros(points2.rows, 2);
+    auto * cp1 = (float *) corr_points1.data;
+    auto * cp2 = (float *) corr_points2.data;
+    cv::Mat H_inv = H.inv();
+    const auto * const h = (double *) H.data;
+    const auto * const h_inv = (double *) H_inv.data;
+    // https://cmp.felk.cvut.cz/~chum/papers/chum-icpr12.pdf
+    double s2_sqr = 1, EPS = 1;
+    for (int i = 0; i < points1.rows; i++) {
+        if (! mask[i]) continue;
+        const auto x1 = p1[2*i], y1 = p1[2*i+1], x2 = p2[2*i], y2 = p2[2*i+1];
+        // Jacobian of homography matrix
+        cv::Matx33d A (h[0] - x2*h[6], h[1] - x2*h[7], h[2] + x2 * (x1 * h[6] + y1 * h[7]),
+                       h[3] - y2*h[6], h[4] - y2*h[7], h[5] + y2 * (x1 * h[6] + y1 * h[7]),
+                       0, 0, h[8] + h[6] * x1 + h[7] * y1);
+        const double s1_sqr = pow(1/cv::determinant(A / A(2,2)), 2);
+        // H^-1 (x2 y2 1)
+        const auto z1_proj =  h_inv[6] * x2 + h_inv[7] * y2 + h_inv[8];
+        const auto x1_proj = (h_inv[0] * x2 + h_inv[1] * y2 + h_inv[2]) / z1_proj;
+        const auto y1_proj = (h_inv[3] * x2 + h_inv[4] * y2 + h_inv[5]) / z1_proj;
+
+        const auto x1_corr = (s1_sqr * x1 + s2_sqr * x1_proj) / (s1_sqr + s2_sqr);
+        const auto y1_corr = (s1_sqr * y1 + s2_sqr * y1_proj) / (s1_sqr + s2_sqr);
+
+        const auto z2_corr =  h[6] * x1_corr + h[7] * y1_corr + h[8];
+        const auto x2_corr = (h[0] * x1_corr + h[1] * y1_corr + h[2]) / z2_corr;
+        const auto y2_corr = (h[3] * x1_corr + h[4] * y1_corr + h[5]) / z2_corr;
+
+        (*cp1++) = x1_corr;
+        (*cp1++) = y1_corr;
+        (*cp2++) = x2_corr;
+        (*cp2++) = y2_corr;
+    }
+
+    corr_points1.convertTo(corr_points1, points1.type());
+    corr_points2.convertTo(corr_points2, points2.type());
+    return true;
+}
+/*
+ //
+ // Older version for correcting points using half homography
+ //
 bool getCorrectedPointsHomography(const cv::Mat &points, cv::Mat &corr_points, const cv::Mat &H, const std::vector<bool> &mask) {
     Eigen::Matrix<double, 3, 3, Eigen::RowMajor> h((double *)H.data);
     h /= h(2,2); // must be normaized to avoid internal sqrt error
-    // std::cout << h << '\n';
     Eigen::Matrix<double, 3, 3> sqrtH;
     try {
         sqrtH = h.sqrt();
@@ -1019,8 +967,6 @@ bool getCorrectedPointsHomography(const cv::Mat &points, cv::Mat &corr_points, c
     }
     cv::Mat_<double > H_half (3,3,(double*)sqrtH.data());
     cv::transpose(H_half, H_half);
-//    const auto * const pts = (float *) points.data;
-
     cv::Mat pts1, pts2, mid_pts, corr_pts1, corr_pts2;
     cv::vconcat(points.colRange(0,2).t(), cv::Mat_<float>::ones(1, points.rows), pts1);
     cv::vconcat(points.colRange(2,4).t(), cv::Mat_<float>::ones(1, points.rows), pts2);
@@ -1043,5 +989,6 @@ bool getCorrectedPointsHomography(const cv::Mat &points, cv::Mat &corr_points, c
     cv::hconcat(corr_pts1.rowRange(0,2).t(), corr_pts2.rowRange(0,2).t(), corr_points);
     corr_points.convertTo(corr_points, CV_32F);
     return true;
-}
+}*/
+
 }

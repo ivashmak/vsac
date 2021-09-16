@@ -68,8 +68,8 @@ void Samples::example (ESTIMATION_TASK task) {
         }
     }
     // advanced settings and parameters
-    vsac::Params params (threshold, est_task, sorted ? vsac::SamplingMethod::SAMPLING_PROSAC : vsac::SamplingMethod::SAMPLING_UNIFORM,
-         confidence, max_iters, vsac::ScoreMethod::SCORE_METHOD_MSAC); // worth trying also SCORE_METHOD_MAGSAC, todo: change MSAC to MLESAC
+    vsac::Params params (est_task, threshold, confidence, max_iters, sorted ? vsac::SamplingMethod::SAMPLING_PROSAC : vsac::SamplingMethod::SAMPLING_UNIFORM,
+            vsac::ScoreMethod::SCORE_METHOD_MSAC); // worth trying also SCORE_METHOD_MAGSAC, todo: change MSAC to MLESAC
     
     /////////////////////////////////////////////// OPTIONAL PARAMETERS //////////////////////////////
     // params.setRandomGeneratorState(random() % INT_MAX); // set state of the random generator
@@ -83,7 +83,7 @@ void Samples::example (ESTIMATION_TASK task) {
     // params.setLOSampleSize(5*params.getSampleSize());
     // params.setLOIterations(12);
 
-    // try to parallelize. The speed up is more noticeable when points are not sorted
+    // try to parallelize
     // params.setParallel(true);
 
     // bad name of function, but it does change sigma (noise level) for MLESAC score.
@@ -123,7 +123,7 @@ void Samples::example (ESTIMATION_TASK task) {
     std::vector<bool> inliers_mask;
     std::vector<int> inliers_indicies;
     std::vector<float> point_residuals;
-//    try {
+    try {
         const auto begin_time = std::chrono::steady_clock::now();
         const bool success = vsac::estimate(params, points1, points2, output,
                                             K1, K2, distortion_coeff1, distortion_coeff2);
@@ -146,17 +146,23 @@ void Samples::example (ESTIMATION_TASK task) {
             std::cerr << "VSAC failed!\n";
             exit(EXIT_FAILURE);
         }
-//    } catch (const std::exception &e) {
-//        std::cerr << "VSAC crashed! " << e.what() << "\n";
-//        exit(EXIT_FAILURE);
-//    }
+    } catch (const std::exception &e) {
+        std::cerr << "VSAC crashed! " << e.what() << "\n";
+        exit(EXIT_FAILURE);
+    }
 
     if (task == ESTIMATION_TASK::HOMOGRAPHY_MAT || task == ESTIMATION_TASK::FUNDAMENTAL_MAT || task == ESTIMATION_TASK::ESSENTIAL_MAT) {
-        cv::Mat corrected_points;
+        // get corrected points such that their error distances to estimated model is 0
+        cv::Mat points1_corrected, points2_corrected;
+        std::vector<bool> all_pts;
+        if (inliers_mask.empty()) all_pts = std::vector<bool>(points1.rows, true);
         if (task == ESTIMATION_TASK::HOMOGRAPHY_MAT) {
-
-        } else {
-            cv::Mat F = task == ESTIMATION_TASK::ESSENTIAL_MAT ? K2.inv().t() * model = K1.inv() : model;
+            vsac::getCorrectedPointsHomography(points1, points2, points1_corrected, points2_corrected, model, inliers_mask.empty() ? all_pts : inliers_mask);
+        } else if (task == ESTIMATION_TASK::FUNDAMENTAL_MAT) {
+            vsac::triangulatePointsLindstrom(model /*F*/, points1, points2, points1_corrected, points2_corrected, inliers_mask.empty() ? all_pts : inliers_mask);
+        } else { // essential mat
+            cv::Mat points3D, R_from_E, t_from_E;
+            vsac::triangulatePointsLindstrom(K2.inv().t() * model = K1.inv() /*F*/, points1, points2, points1_corrected, points2_corrected, K1, K2, points3D, R_from_E, t_from_E, inliers_mask.empty() ? all_pts : inliers_mask);
         }
     }
 

@@ -51,6 +51,13 @@ pybind11::tuple estimate(const vsac::Params &params,
     return pybind11::make_tuple(model_out, inliers_out);
 }
 
+bool getCorrectedPointsHomography
+         (const pybind11::array_t<double> &points1, const pybind11::array_t<double> &points2,
+        pybind11::array_t<double> &corr_points1, pybind11::array_t<double> &corr_points2,
+        const pybind11::array_t<double> &H, const pybind11::bind_vector<std::vector<bool>> &good_point_mask) {
+    return false;
+}
+
 PYBIND11_MODULE(pvsac, m) {
     m.doc() = "VSAC python bindings";
     pybind11::enum_<vsac::EstimationMethod>(m, "EstimationMethod")
@@ -72,9 +79,16 @@ PYBIND11_MODULE(pvsac, m) {
             .export_values();
 
     pybind11::class_<vsac::Params> (m, "Params")
-            .def(pybind11::init<double , vsac::EstimationMethod, vsac::SamplingMethod, double, int, vsac::ScoreMethod>());
+            .def(pybind11::init<vsac::EstimationMethod, double, double, int, vsac::SamplingMethod, vsac::ScoreMethod>())
+            .def("setVerifier", &vsac::Params::setVerifier)
+            .def("setParallel", &vsac::Params::setParallel)
+            .def("setPolisher", &vsac::Params::setPolisher)
+            .def("setNonRandomnessTest", &vsac::Params::setNonRandomnessTest);
+
+    m.def("getCorrectedPointsHomography", &getCorrectedPointsHomography, "get corrected points by H", pybind11::arg("points1"), pybind11::arg("points2"), pybind11::arg("corr_points1"),
+         pybind11::arg("corr_points2"), pybind11::arg("H"), pybind11::arg("good_point_mask"));
 
     m.def("estimate", &estimate, "estimate model", pybind11::arg("params"), pybind11::arg("pts1"), pybind11::arg("pts2"),
-            pybind11::arg("K1")=pybind11::none(), pybind11::arg("K2")=pybind11::none(),
+          pybind11::arg("K1")=pybind11::none(), pybind11::arg("K2")=pybind11::none(),
           pybind11::arg("dist_coef1")=pybind11::none(), pybind11::arg("dist_coef2")=pybind11::none());
 }

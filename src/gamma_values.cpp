@@ -112,6 +112,7 @@ public:
         gamma_incomplete = std::vector<double>(max_size_table);
         gamma = std::vector<double>(max_size_table);
 
+        // do linear interpolation of gamma values
         const int step = (int)((double)max_size_table / (number_of_anchor_points-1));
         int arr_cnt = 0;
         for (int i = 0; i < number_of_anchor_points-1; i++) {

@@ -39,7 +39,7 @@ public:
         const double pred_iters = log(1 - conf) / log(1 - pow(static_cast<double>(inlier_number)/points_size, sample_size));
         if (std::isinf(pred_iters))
             return INT_MAX;
-        return pred_iters;
+        return (int) pred_iters + 1;
     }
 };
 Ptr<StandardTerminationCriteria> StandardTerminationCriteria::create(double confidence,
@@ -235,10 +235,8 @@ public:
         const double beta2compl_beta = beta / (1-beta);
         const int step_n = 50, max_n = std::min(points_size, 1200);
         for (int n = sample_size; n < points_size; n+=step_n) {
-            if (n > max_n) {
-                // skip expensive calculation
-                break;
-            }
+            if (n > max_n)
+                break; // skip expensive calculation
 
             // P^R_n(i) = β^(i−m) (1−β)^(n−i+m) (n−m i−m). (7) i = m,...,N
             // initial value for i = m = sample_size
@@ -268,7 +266,7 @@ public:
             non_random_inliers[n-1] = i_min;
         }
 
-        // approximate values of binomial distribution
+        // approximate values of binomial distribution using linear interpolation
         for (int n = sample_size; n <= points_size; n+=step_n) {
             if (n-1+step_n >= max_n) {
                 // copy rest of the values

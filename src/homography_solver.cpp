@@ -15,7 +15,7 @@ public:
         int cnt = 0;
         for (int i = 0; i < 4; i++) {
             const int smpl = 4*sample[i];
-            const double x1 = points[smpl], y1 = points[smpl+1], x2 = points[smpl+2], y2 = points[smpl+3];
+            const auto x1 = points[smpl], y1 = points[smpl+1], x2 = points[smpl+2], y2 = points[smpl+3];
 
             A[cnt++] = -x1;
             A[cnt++] = -y1;
@@ -77,7 +77,7 @@ public:
         for (int i = 0; i < 4; i++ ) {
             const int smpl = 4*sample[i];
             const auto x1 = points[smpl  ], y1 = points[smpl+1],
-                    x2 = points[smpl+2], y2 = points[smpl+3];
+                       x2 = points[smpl+2], y2 = points[smpl+3];
 
             A[cnt++] = -x1;
             A[cnt++] = -y1;
@@ -114,13 +114,13 @@ Ptr<HomographySVDSolver> HomographySVDSolver::create(const Mat &points_) {
 class HomographyNonMinimalSolverImpl : public HomographyNonMinimalSolver {
 private:
     const Mat * points_mat;
-    const Ptr<NormTransform> normTr;
-    bool norm_in_advance;
+    Ptr<NormTransform> normTr = nullptr;
+    Matx33d _T1, _T2;
 public:
-    explicit HomographyNonMinimalSolverImpl (const Mat &points_, bool norm_in_advance_) :
-        points_mat(&points_), normTr (NormTransform::create(points_)) {
-        norm_in_advance = norm_in_advance_;
-    }
+    explicit HomographyNonMinimalSolverImpl (const Mat &norm_points_, const Matx33d &T1, const Matx33d &T2) :
+            points_mat(&norm_points_), _T1(T1), _T2(T2) {}
+    explicit HomographyNonMinimalSolverImpl (const Mat &points_) :
+        points_mat(&points_), normTr (NormTransform::create(points_)) {}
 
     /*
      * Find Homography matrix using (weighted) non-minimal estimation.
@@ -133,8 +133,9 @@ public:
 
         Matx33d T1, T2;
         Mat norm_points_;
-        normTr->getNormTransformation(norm_points_, sample, sample_size, T1, T2);
-        const auto * const norm_points = (float *) norm_points_.data;
+        if (normTr)
+            normTr->getNormTransformation(norm_points_, sample, sample_size, T1, T2);
+        const auto * const norm_points = normTr ? (float *) norm_points_.data : (float *) points_mat->data;
 
         double a1[9] = {0, 0, -1, 0, 0, 0, 0, 0, 0},
                a2[9] = {0, 0, 0, 0, 0, -1, 0, 0, 0},
@@ -143,8 +144,8 @@ public:
         if (weights.empty()) {
             for (int i = 0; i < sample_size; i++) {
                 const int smpl = 4*i;
-                const double x1 = norm_points[smpl  ], y1 = norm_points[smpl+1],
-                             x2 = norm_points[smpl+2], y2 = norm_points[smpl+3];
+                const auto x1 = norm_points[smpl  ], y1 = norm_points[smpl+1],
+                           x2 = norm_points[smpl+2], y2 = norm_points[smpl+3];
 
                 a1[0] = -x1;
                 a1[1] = -y1;
@@ -166,8 +167,8 @@ public:
             for (int i = 0; i < sample_size; i++) {
                 const int smpl = 4*i;
                 const double weight = weights[i];
-                const double x1 = norm_points[smpl  ], y1 = norm_points[smpl+1],
-                             x2 = norm_points[smpl+2], y2 = norm_points[smpl+3];
+                const auto x1 = norm_points[smpl  ], y1 = norm_points[smpl+1],
+                           x2 = norm_points[smpl+2], y2 = norm_points[smpl+3];
                 const double minus_weight_times_x1 = -weight * x1,
                              minus_weight_times_y1 = -weight * y1,
                                    weight_times_x2 =  weight * x2,
@@ -210,8 +211,8 @@ public:
         if (! eigen(Matx<double, 9, 9>(AtA), D, Vt)) return 0;
         Mat H = Mat_<double>(3, 3, Vt.val + 72/*=8*9*/);
 #endif
-
-        const auto * const t1 = T1.val, * const t2 = T2.val, * const h = (double *) H.data;
+        const auto * const h = (double *) H.data;
+        const auto * const t1 = normTr ? T1.val : _T1.val, * const t2 = normTr ? T2.val : _T2.val;
         // H = T2^-1 H T1
         models = std::vector<Mat>{ Mat(Matx33d(t1[0]*(h[0]/t2[0] - (h[6]*t2[2])/t2[0]),
                 t1[0]*(h[1]/t2[0] - (h[7]*t2[2])/t2[0]), h[2]/t2[0] + t1[2]*(h[0]/t2[0] -
@@ -227,8 +228,11 @@ public:
     int getMinimumRequiredSampleSize() const override { return 4; }
     int getMaxNumberOfSolutions () const override { return 1; }
 };
-Ptr<HomographyNonMinimalSolver> HomographyNonMinimalSolver::create(const Mat &points_, bool norm_in_advance) {
-    return makePtr<HomographyNonMinimalSolverImpl>(points_, norm_in_advance);
+Ptr<HomographyNonMinimalSolver> HomographyNonMinimalSolver::create(const Mat &points_) {
+    return makePtr<HomographyNonMinimalSolverImpl>(points_);
+}
+Ptr<HomographyNonMinimalSolver> HomographyNonMinimalSolver::create(const Mat &points_, const Matx33d &T1, const Matx33d &T2) {
+    return makePtr<HomographyNonMinimalSolverImpl>(points_, T1, T2);
 }
 
 class AffineMinimalSolverImpl : public AffineMinimalSolver {
@@ -290,7 +294,6 @@ public:
 
     int estimate (const std::vector<int> &sample, int sample_size, std::vector<Mat> &models,
                   const std::vector<double> &weights) const override {
-        // surprisingly normalization of points does not improve the output model
         // Mat norm_points_, T1, T2;
         // norm_transform.getNormTransformation(norm_points_, sample, sample_size, T1, T2);
         // const auto * const n_pts = (double *) norm_points_.data;

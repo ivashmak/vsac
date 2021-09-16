@@ -95,7 +95,6 @@ private:
     // find inliers using graph cut algorithm.
     int labeling (const Mat& model) {
         const auto &errors = error->getErrors(model);
-
         detail::GCGraph<double> graph;
 
         for (int pt = 0; pt < points_size; pt++)
@@ -193,23 +192,18 @@ private:
     double threshold, new_threshold, threshold_step;
     std::vector<double> weights;
 public:
-
     InnerIterativeLocalOptimizationImpl (const Ptr<Estimator> &estimator_, const Ptr<Quality> &quality_,
          const Ptr<RandomGenerator> &lo_sampler_, int pts_size,
          double threshold_, bool is_iterative_, int lo_iter_sample_size_,
          int lo_inner_iterations_=10, int lo_iter_max_iterations_=5,
          double threshold_multiplier_=4)
         : estimator (estimator_), quality (quality_), lo_sampler (lo_sampler_)
-        , lo_iter_sample_size(0)
-        , new_threshold(0), threshold_step(0)
-    {
+        , lo_iter_sample_size(0), new_threshold(0), threshold_step(0) {
         lo_inner_max_iterations = lo_inner_iterations_;
         lo_iter_max_iterations = lo_iter_max_iterations_;
 
         threshold = threshold_;
-
         lo_sample_size = lo_sampler->getSubsetSize();
-
         is_iterative = is_iterative_;
         if (is_iterative) {
             lo_iter_sample_size = lo_iter_sample_size_;
@@ -221,7 +215,6 @@ public:
             // In the last iteration there be original threshold θ.
             threshold_step = (new_threshold - threshold) / lo_iter_max_iterations_;
         }
-
         lo_models = std::vector<Mat>(estimator->getMaxNumSolutionsNonMinimal());
 
         // Allocate max memory to avoid reallocation
@@ -347,13 +340,12 @@ private:
     std::vector<double> weights;
     std::vector<int> inliers;
     std::vector<cv::Mat> models;
-    double inlier_threshold = 2; // todo: use it! min max
+    double inlier_threshold_sqr;
 
     int num_lo_optimizations = 0;
 public:
     SimpleLocalOptimizationImpl (const Ptr<Degeneracy> &degen_, const Ptr<Quality> &quality_, const Ptr<Estimator> &estimator_,
-                                 const Ptr<Termination> termination_, const Ptr<RandomGenerator> &random_gen,
-                                 int max_lo_iters_) :
+            const Ptr<Termination> termination_, const Ptr<RandomGenerator> &random_gen, int max_lo_iters_, double inlier_threshold_sqr_) :
             degen(degen_), quality(quality_), error(quality_->getErrorFnc()), estimator(estimator_), termination(termination_), random_generator(random_gen) {
         max_lo_iters = max_lo_iters_;
         non_min_sample_size = random_generator->getSubsetSize();
@@ -362,6 +354,7 @@ public:
         inliers = std::vector<int>(quality_->getPointsSize());
         models = std::vector<cv::Mat>(estimator_->getMaxNumSolutionsNonMinimal());
         points_size = quality_->getPointsSize();
+        inlier_threshold_sqr = inlier_threshold_sqr_;
     }
     void setCurrentRANSACiter (int ransac_iter) override { current_ransac_iter = ransac_iter; }
     int getMaxIterations () const override {
@@ -372,8 +365,7 @@ public:
         new_model_score = best_model_score;
         best_model.copyTo(new_model);
 
-         int num_inliers = quality->getInliers(best_model, inliers);
-//        int num_inliers = Quality::getInliers(error, best_model, inliers, inlier_threshold); // GOOD IDEA, BUT NOT WORKING FOR E, FIX IT
+        int num_inliers = Quality::getInliers(error, best_model, inliers, inlier_threshold_sqr);
         // std::cout << "init num inliers " << num_inliers << '\n';
         Ptr<UniformRandomGenerator> random_generator2;
         if (num_inliers <= non_min_sample_size) {
@@ -400,8 +392,7 @@ public:
                     new_model_score = score;
                    // std::cout << "LO update best, new MLESAC score " << score.score << " best " << best_model_score.score << "\n";
                     models[m].copyTo(new_model);
-                     num_inliers = quality->getInliers(new_model, inliers);
-//                    num_inliers = Quality::getInliers(error, new_model, inliers, inlier_threshold); // GOOD IDEA, BUT NOT WORKING FOR E, FIX IT
+                    num_inliers = Quality::getInliers(error, new_model, inliers, inlier_threshold_sqr);
                     if (termination != nullptr && current_ransac_iter > termination->update(new_model, new_model_score.inlier_number))
                         break;
                     if (num_inliers <= non_min_sample_size) {
@@ -417,8 +408,8 @@ public:
     }
 };
 Ptr<SimpleLocalOptimization> SimpleLocalOptimization::create (const Ptr<Degeneracy> &degen, const Ptr<Quality> &quality_,
-        const Ptr<Estimator> &estimator_, const Ptr<Termination> termination_, const Ptr<RandomGenerator> &random_gen, int max_lo_iters_) {
-    return makePtr<SimpleLocalOptimizationImpl> (degen, quality_, estimator_, termination_, random_gen, max_lo_iters_);
+        const Ptr<Estimator> &estimator_, const Ptr<Termination> termination_, const Ptr<RandomGenerator> &random_gen, int max_lo_iters_, double inlier_thr_sqr) {
+    return makePtr<SimpleLocalOptimizationImpl> (degen, quality_, estimator_, termination_, random_gen, max_lo_iters_, inlier_thr_sqr);
 }
 
 
@@ -699,7 +690,7 @@ public:
          const Ptr<RandomGenerator> &random_gen, int iters) : quality(quality_), estimator (estimator_) {
         // does not really matter here
         termination = StandardTerminationCriteria::create(0.99, quality_->getPointsSize(), estimator_->getMinimalSampleSize(), 100);
-        simple_lo = SimpleLocalOptimization::create(degen, quality_, estimator_, termination, random_gen, iters);
+        simple_lo = SimpleLocalOptimization::create(degen, quality_, estimator_, termination, random_gen, iters, quality_->getThreshold());
         simple_lo->setCurrentRANSACiter(-1); // do full LO
     }
     bool polishSoFarTheBestModel(const Mat &model, const Score &best_model_score,

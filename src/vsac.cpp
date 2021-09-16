@@ -5,44 +5,6 @@
 #include <atomic>
 
 namespace cv { namespace vsac {
-/*
- * pts1, pts2 are matrices either N x a, N x b or a x N or b x N, where N > a and N > b
- * pts1 are image points, if pnp pts2 are object points otherwise - image points as well.
- * output is matrix of size N x (a + b)
- * return points_size = N
- */
-int mergePoints (InputArray pts1_, InputArray pts2_, Mat &pts, bool ispnp) {
-    Mat pts1 = pts1_.getMat(), pts2 = pts2_.getMat();
-    auto convertPoints = [] (Mat &points, int pt_dim) {
-        points.convertTo(points, CV_32F); // convert points to have float precision
-        if (points.channels() > 1)
-            points = points.reshape(1, (int)points.total()); // convert point to have 1 channel
-        if (points.rows < points.cols)
-            transpose(points, points); // transpose so points will be in rows
-        CV_CheckGE(points.cols, pt_dim, "Invalid dimension of point");
-        if (points.cols != pt_dim) // in case when image points are 3D convert them to 2D
-            points = points.colRange(0, pt_dim);
-    };
-
-    convertPoints(pts1, 2); // pts1 are always image points
-    convertPoints(pts2, ispnp ? 3 : 2); // for PnP points are 3D
-
-    // points are of size [Nx2 Nx2] = Nx4 for H, F, E
-    // points are of size [Nx2 Nx3] = Nx5 for PnP
-    hconcat(pts1, pts2, pts);
-    return pts.rows;
-}
-
-void saveMask (OutputArray mask, const std::vector<bool> &inliers_mask) {
-    if (mask.needed()) {
-        const int points_size = (int) inliers_mask.size();
-        mask.create(points_size, 1, CV_8U);
-        auto * maskptr = mask.getMat().ptr<uchar>();
-        for (int i = 0; i < points_size; i++)
-            maskptr[i] = (uchar) inliers_mask[i];
-    }
-}
-
 void initialize (int state, int points_size, double threshold, double max_thr, const ::vsac::Params &params, const Mat &points, 
         const Mat &calib_points, const Mat &image_points, const std::vector<Ptr<NeighborhoodGraph>> &layers, const std::vector<std::vector<int>> &close_pts_mask,
         const Mat &K1, const Mat &K2, const Ptr<NeighborhoodGraph> &graph, Ptr<MinimalSolver> &min_solver, 
@@ -50,12 +12,17 @@ void initialize (int state, int points_size, double threshold, double max_thr, c
         Ptr<Degeneracy> &degeneracy, Ptr<Quality> &quality,
         Ptr<ModelVerifier> &verifier, Ptr<LocalOptimization> &lo, Ptr<Termination> &termination,
         Ptr<Sampler> &sampler, Ptr<RandomGenerator> &lo_sampler, bool parallel_call) {
-
 #if DEBUG
     const auto init_time = std::chrono::steady_clock::now();
 #endif
-
     const int min_sample_size = params.getSampleSize();
+
+    // inner inlier threshold will be used in LO to obtain inliers
+    // additionally in DEGENSAC for F
+    double inner_inlier_thr_sqr = threshold;
+    if (params.isHomography()) inner_inlier_thr_sqr = std::max(inner_inlier_thr_sqr, 5.25); // at least 2.5 px
+    else if (params.isFundamental()) inner_inlier_thr_sqr = std::max(inner_inlier_thr_sqr, 4.); // at least 2 px
+
     switch (params.getError()) {
         case ::vsac::ErrorMetric::SYMM_REPR_ERR:
             error = ReprojectionErrorSymmetric::create(points); break;
@@ -101,36 +68,42 @@ void initialize (int state, int points_size, double threshold, double max_thr, c
         estimator = HomographyEstimator::create(min_solver, non_min_solver, degeneracy);
     } else if (params.isFundamental()) {
         degeneracy = FundamentalDegeneracy::create(state++, quality, points, min_sample_size,
-               params.getPlaneAndParallaxIters(), 8. /*sqr homogr thr*/, K1, K2);
+               params.getPlaneAndParallaxIters(), 8. /*sqr homogr thr*/, inner_inlier_thr_sqr, K1, K2);
         degeneracy->setClosePointsMask(close_pts_mask);
-        const auto img_size = params.getImageSize();
-        if (K1.empty() && img_size.width != 0 && img_size.height != 0) {
-            if (img_size.width > img_size.height)
-                 degeneracy.dynamicCast<FundamentalDegeneracy>()->setPrincipalPoint(img_size.width/2., img_size.height/2.);
-            else degeneracy.dynamicCast<FundamentalDegeneracy>()->setPrincipalPoint(img_size.height/2., img_size.width/2.);
+        auto img1_size = params.getImage1Size(), img2_size = params.getImage2Size();
+        // std::cout << K1.empty() << " " << img1_size.width << " " << img1_size.height <<"\n";
+        if (K1.empty()) {
+            if (img1_size.width != 0 && img1_size.height != 0) {
+                if (img1_size.width < img1_size.height) std::swap(img1_size.width, img1_size.height);
+                if (img2_size.height != 0 && img2_size.width != 0) {
+                    if (img2_size.width < img2_size.height) std::swap(img2_size.width, img2_size.height);
+                    degeneracy.dynamicCast<FundamentalDegeneracy>()->setPrincipalPoint(img1_size.width/2., img1_size.height/2., img2_size.width/2., img2_size.height/2.);
+                } else degeneracy.dynamicCast<FundamentalDegeneracy>()->setPrincipalPoint(img1_size.width/2., img1_size.height/2.);
+            }
+        }
+
+        if (K1.empty() && img1_size.width != 0 && img1_size.height != 0) {
+            if (img1_size.width > img1_size.height)
+                 degeneracy.dynamicCast<FundamentalDegeneracy>()->setPrincipalPoint(img1_size.width/2., img1_size.height/2.);
+            else degeneracy.dynamicCast<FundamentalDegeneracy>()->setPrincipalPoint(img1_size.height/2., img1_size.width/2.);
         }
         if(min_sample_size == 7) {
             if (params.getRansacSolver() == ::vsac::SVD_SOLVER)
                 min_solver = FundamentalSVDSolver::create(points);
             else min_solver = FundamentalMinimalSolver7pts::create(points);
         } else min_solver = FundamentalMinimalSolver8pts::create(points);
-        non_min_solver = FundamentalNonMinimalSolver::create(points);
+        non_min_solver = EpipolarNonMinimalSolver::create(points, true);
         estimator = FundamentalEstimator::create(min_solver, non_min_solver, degeneracy);
     } else if (params.isEssential()) {
         degeneracy = EssentialDegeneracy::create(points, min_sample_size);
-        if (params.getRansacSolver() == ::vsac::SVD_SOLVER)
-            min_solver = EssentialMinimalSolverStewenius5ptsSVD::create(points);
-        else min_solver = EssentialMinimalSolverStewenius5pts::create(points);
-        non_min_solver = EssentialNonMinimalSolver::create(points);
-//        non_min_solver = EssentialNonMinimalSolverViaF::create(image_points, K1, K2);
-//        non_min_solver = EssentialNonMinimalSolverViaT::create(points);
+        min_solver = EssentialMinimalSolverStewenius5pts::create(points, params.getRansacSolver() == ::vsac::SVD_SOLVER);
+        non_min_solver = EpipolarNonMinimalSolver::create(points, false);
         estimator = EssentialEstimator::create(min_solver, non_min_solver, degeneracy);
     } else if (params.isPnP()) {
         degeneracy = makePtr<Degeneracy>();
         if (min_sample_size == 3) {
             min_solver = P3PSolver::create(points, calib_points, K1);
             non_min_solver = DLSPnP::create(points, calib_points, K1);
-//            non_min_solver = PnPNonMinimalSolver::create(points);
         } else {
             if (params.getRansacSolver() == ::vsac::SVD_SOLVER)
                 min_solver = PnPSVDSolver::create(points);
@@ -197,12 +170,11 @@ void initialize (int state, int points_size, double threshold, double max_thr, c
 
     if (params.getLO() != ::vsac::LocalOptimMethod::LOCAL_OPTIM_NULL) {
         lo_sampler = UniformRandomGenerator::create(state, points_size, params.getLOSampleSize());
-        const bool force_LO = params.isForceLO();
         const auto lo_termination = StandardTerminationCriteria::create(params.getConfidence(), points_size, min_sample_size, params.getMaxIters());
         switch (params.getLO()) {
             case ::vsac::LocalOptimMethod::LOCAL_OPTIM_INNER_LO:
-                lo = SimpleLocalOptimization::create(degeneracy, quality, estimator, force_LO ? nullptr : lo_termination, lo_sampler,
-                                         params.getLOInnerMaxIters()); break;
+                lo = SimpleLocalOptimization::create(degeneracy, quality, estimator, lo_termination, lo_sampler,
+                     params.getLOInnerMaxIters(), inner_inlier_thr_sqr); break;
             case ::vsac::LocalOptimMethod::LOCAL_OPTIM_INNER_AND_ITER_LO:
                 lo = InnerIterativeLocalOptimization::create(estimator, quality, lo_sampler,
                      points_size, threshold, true, params.getLOIterativeSampleSize(),
@@ -210,12 +182,12 @@ void initialize (int state, int points_size, double threshold, double max_thr, c
                      params.getLOThresholdMultiplier()); break;
             case ::vsac::LocalOptimMethod::LOCAL_OPTIM_GC:
                 lo = GraphCut::create(estimator, error, quality, graph, lo_sampler, threshold,
-                   params.getGraphCutSpatialCoherenceTerm(), params.getLOInnerMaxIters(), force_LO ? nullptr : lo_termination); break;
+                   params.getGraphCutSpatialCoherenceTerm(), params.getLOInnerMaxIters(), lo_termination); break;
             case ::vsac::LocalOptimMethod::LOCAL_OPTIM_SIGMA:
                 lo = SigmaConsensus::create(estimator, error, quality, verifier, gamma_generator,
                      params.getLOSampleSize(), params.getLOInnerMaxIters(),
                      params.getDegreesOfFreedom(), params.getSigmaQuantile(),
-                     params.getUpperIncompleteOfSigmaQuantile(), params.getC(), max_thr, force_LO ? nullptr : lo_termination); break;
+                     params.getUpperIncompleteOfSigmaQuantile(), params.getC(), max_thr, lo_termination); break;
             default: CV_Error(cv::Error::StsNotImplemented , "Local Optimization is not implemented!");
         }
     }
@@ -226,7 +198,7 @@ void initialize (int state, int points_size, double threshold, double max_thr, c
 
 class VSAC {
 protected:
-    const Mat &points; //delete
+    const Mat &points;
     const ::vsac::Params &params;
     const Ptr<Estimator> _estimator;
     const Ptr<Quality> _quality;
@@ -247,7 +219,6 @@ protected:
     std::vector<Ptr<NeighborhoodGraph>> layers;
     std::vector<std::vector<int>> close_pts_mask;
 public:
-
     void setDataForParallel(double threshold_, double max_thr_, const Mat &K1_, const Mat &K2_, const Mat &calib_points_, const Mat &image_points_,
         const Ptr<NeighborhoodGraph> &graph_, const std::vector<Ptr<NeighborhoodGraph>> &layers_, const std::vector<std::vector<int>> &close_pts_mask_) {
         threshold = threshold_; max_thr = max_thr_; K1 = K1_; K2 = K2_; calib_points = calib_points_; image_points =  image_points_;
@@ -272,10 +243,7 @@ public:
 #if DEBUG
         const auto begin_time = std::chrono::steady_clock::now();
 #endif
-
-        // check if LO
-        const bool LO = params.getLO() != ::vsac::LocalOptimMethod::LOCAL_OPTIM_NULL,
-            IS_QUASI_SAMPLING = params.isQuasiSampling();
+        const bool LO = params.getLO() != ::vsac::LocalOptimMethod::LOCAL_OPTIM_NULL, IS_QUASI_SAMPLING = params.isQuasiSampling();
         Score best_score;
         Mat best_model;
         const int MAX_MODELS_ADAPT = 21, MAX_ITERS_ADAPT = MAX_MODELS_ADAPT/*assume at least 1 model from 1 sample, todo: think about extreme cases*/, sample_size = params.getSampleSize();
@@ -285,9 +253,6 @@ public:
         double lambda_non_random = 0;
         int final_iters, num_lo_runs = 0, num_total_tested_models = 0, num_so_far_the_best = 0;
 
-        /////////////// test ///////////
-        int num_chirality_rej = 0;
-        ////////////////////////////////
 #if DEBUG
         double est_time = 0, eval_time = 0, polisher_time = 0, lo_time = 0;
         int num_degenerate_cases = 0, num_degensac_runs = 0;
@@ -298,7 +263,6 @@ public:
         const int MAX_TEST_MODELS_NONRAND = params.isNonRandomnessTest() ? MAX_MODELS_ADAPT : 0;
         std::vector<Mat> models_for_random_test; models_for_random_test.reserve(MAX_TEST_MODELS_NONRAND);
         std::vector<std::vector<int>> samples_for_random_test; samples_for_random_test.reserve(MAX_TEST_MODELS_NONRAND);
-        //
 
         // for the verification of F in the end
         bool last_model_from_LO = false, last_model_from_min_sample = true;
@@ -392,11 +356,6 @@ public:
             };
             for (; iters < max_iters; iters++) {
                 _sampler->generateSample(sample);
-#if EXP_QUASI
-                const auto &gt_inliers_mask = params.getGTInliersMaskDEBUG();
-                for (int s= 0; s < sample_size; s++) if (gt_inliers_mask[sample[s]]) avg_inls_in_sample++;
-#endif
-
                 int number_of_models;
                 if (adapt) {
                     const auto time_estimation = std::chrono::steady_clock::now();
@@ -418,13 +377,6 @@ public:
                     est_time += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - temp_time).count();
 #endif
                 }
-                /////////////////// test ////////////////
-                // // const auto min_solver = FundamentalMinimalSolver7pts::create(points);
-                // const auto min_solver = HomographyMinimalSolver4ptsGEM::create(points);
-                // std::vector<Mat> models_t;
-                // num_chirality_rej += min_solver->estimate(sample, models_t) - number_of_models;
-                /////////////////////////////////////////
-    
                 for (int i = 0; i < number_of_models; i++) {
                     num_total_tested_models++;
                     if (adapt) {
@@ -445,18 +397,14 @@ public:
                         const auto temp_time = std::chrono::steady_clock::now();
 #endif
                         if (_model_verifier->isModelGood(models[i])) {
-                            if (!_model_verifier->getScore(current_score)) {
-                                if (_model_verifier->hasErrors())
-                                     current_score = _quality->getScore(_model_verifier->getErrors());
-                                else current_score = _quality->getScore(models[i]);
-                            }
+                            if (!_model_verifier->getScore(current_score))
+                                current_score = _quality->getScore(models[i]);
                         } else {
 #if DEBUG
                             eval_time += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - temp_time).count();
                             const auto sc = _quality->getScore(models[i]);
-                            if (sc.isBetter(best_score)) {
+                            if (sc.isBetter(best_score))
                                 std::cout << "SPRT REJECTED BETTER MODEL (" << sc.score << ", " << sc.inlier_number << ")\n";
-                            }
 #endif
                             continue;
                         }
@@ -487,12 +435,8 @@ public:
                                 update_best(non_degenerate_model, non_degenerate_model_score);
                             else continue;
                         } else update_best(models[i], current_score);
-                        if (params.isForceLO())
-                            runLO(iters);
-                        else {
-                            if (iters < max_iters && LO && best_score.inlier_number > min_non_random_inliers && IoU < IOU_SIMILARITY_THR && !adapt)
-                                runLO(iters); // update model by Local optimization                            
-                        }
+                        if (iters < max_iters && LO && best_score.inlier_number > min_non_random_inliers && IoU < IOU_SIMILARITY_THR && !adapt)
+                            runLO(iters); // update model by Local optimization
                     } // end of if so far the best score
                     else if (models_for_random_test.size() < MAX_TEST_MODELS_NONRAND) {
                         models_for_random_test.emplace_back(models[i].clone());
@@ -504,8 +448,6 @@ public:
                 if (adapt && iters >= MAX_ITERS_ADAPT && num_total_tested_models >= MAX_MODELS_ADAPT &&
                         num_correspondences_of_bad_models - best_score.inlier_number - correction_inls > 0) {
                     adapt = false;
-//                    double delta = (double)(num_correspondences_of_bad_models - best_score.inlier_number - correction_inls)
-//                            / ((num_total_tested_models - 1 - correction_models) * points_size);
                     ////////////////////////// update ///////////////////////
                     supports.resize(std::min(num_total_tested_models, (int)supports.size()));
                     std::sort(supports.begin(), supports.end());
@@ -519,9 +461,6 @@ public:
                     }
                     delta /= (num_lower * points_size);
                     if (std::isnan(delta)) delta = params.getSPRTdelta();
-//                    for (const auto sup : supports) { std::cout << sup << " "; }std::cout << "\n";
-//                    const double delta_avg = (double)(num_correspondences_of_bad_models - best_score.inlier_number - correction_inls)
-//                                             / ((num_total_tested_models - 1 - correction_models) * points_size);
 //                    std::cout << "delta avg " << delta_avg << " lambda avg " << delta_avg * points_size << " new delta " << delta << " lambda " << delta * points_size << "\n";
                     //////////////////////////////////////////////////////////////////////
 
@@ -555,8 +494,6 @@ public:
             std::vector<std::vector<Mat>> tested_models_threads(MAX_THREADS);
             std::vector<std::vector<std::vector<int>>> tested_samples_threads(MAX_THREADS);
             std::vector<std::vector<int>> best_samples_threads(MAX_THREADS);
-
-            Mutex mutex; // only for prosac
 
             std::vector<int> growth_function, non_random_inliers;
             const int min_termination_length = is_prosac ? _termination.dynamicCast<ProsacTerminationCriteria>()->getMinTerminationLength() : 0;
@@ -628,9 +565,6 @@ public:
                     best_score_all_threads = Score(max_number_inliers, best_score_all);
                     // copy new score to best score
                     best_score_thread = new_score;
-                    // mutex.lock();
-                    // std::cout << "num_hypothesis_tested " << num_hypothesis_tested << " new best score " << best_score_all << " inls " << max_number_inliers << '\n';
-                    // mutex.unlock();
                     best_sample_thread = sample;
                     best_inliers_mask = model_inliers_mask;
                     // remember best model
@@ -684,10 +618,6 @@ public:
                         // update termination length
                         if (new_termination_length < termination_length)
                             termination_length = new_termination_length;
-
-//                        mutex.lock();
-//                        std::cout << "new termination length " << termination_length << "\n";
-//                        mutex.unlock();
                     } else max_iters = termination->update(best_model_thread, max_number_inliers);
                 };
                 bool was_LO_run = false;
@@ -722,10 +652,9 @@ public:
                                 // The sample contains m-1 points selected from U_(n-1) at random and u_n
                                 random_gen->generateUniqueRandomSet(sample, sample_size-1, subset_size-1);
                                 sample[sample_size-1] = subset_size-1;
-                            } else {
+                            } else
                                 // Select m points from U_n at random.
                                 random_gen->generateUniqueRandomSet(sample, sample_size, subset_size);
-                            }
                         }
                     } else sampler->generateSample(sample); // use local sampler
 
@@ -744,11 +673,8 @@ public:
                                 supports[num_tested_models-1] = current_score.inlier_number;
                         } else {
                             if (model_verifier->isModelGood(models[i])) {
-                                if (!model_verifier->getScore(current_score)) {
-                                    if (model_verifier->hasErrors())
-                                        current_score = quality->getScore(model_verifier->getErrors());
-                                    else current_score = quality->getScore(models[i]);
-                                }
+                                if (!model_verifier->getScore(current_score))
+                                    current_score = quality->getScore(models[i]);
                             } else continue;
                         }
 
@@ -776,11 +702,6 @@ public:
                     if (adapt && iters >= MAX_ITERS_ADAPT && num_tested_models >= MAX_MODELS_ADAPT &&
                             num_correspondences_of_bad_models - best_score_thread.inlier_number > 0) {
                         adapt = false;
-//                        const double delta = (double)(num_correspondences_of_bad_models - max_non_random_inliers - correction_inls)
-//                                / ((num_total_tested_models - 1 - correction_models) * points_size);
-//                        const double mu = delta * points_size, var = mu * (1 - delta);
-//                        min_non_random_inliers = (int) ceil(mu + 3.719 * sqrt(var));
-
                         supports.resize(std::min(num_tested_models, (int)supports.size()));
                         std::sort(supports.begin(), supports.end());
                         double delta = (double)supports[supports.size()/2] / points_size;
@@ -848,7 +769,7 @@ public:
 #endif
        if (last_model_from_LO && params.isFundamental()) {
            Score new_score;
-           cv::Mat new_model;
+           Mat new_model;
            if (params.isParallel())
                _quality->getInliers(best_model, best_inliers_mask);
            if (_degeneracy.dynamicCast<FundamentalDegeneracy>()->verifyFundamental(best_model, best_score, best_inliers_mask, new_model, new_score)) {
@@ -856,7 +777,7 @@ public:
                 std::cout << "best model from LO is degenerate, score (" << best_score.score << ", " << best_score.inlier_number << "), new (" <<
                     new_score.score << "," << new_score.inlier_number <<"), sftb (" << best_score_model_not_from_LO.score << ", " << best_score_model_not_from_LO.inlier_number << ")" << "\n";
 #endif
-                if (new_score.isBetter(best_score) || new_score.isBetter(best_score_model_not_from_LO)) {
+               if (new_score.isBetter(best_score) || new_score.isBetter(best_score_model_not_from_LO)) {
                    best_score = new_score;
                    new_model.copyTo(best_model);
                } else {
@@ -976,7 +897,7 @@ public:
                 is_random = cdf_N < 0.9999;
 
                 /////////////////// experiments /////////////////
-                std::cout << final_iters << " & " << num_chirality_rej << " & " << num_total_tested_models << " & " << non_random_inls_best_model << " & " << best_score.inlier_number << " & " <<
+                std::cout << final_iters << " & " << num_total_tested_models << " & " << non_random_inls_best_model << " & " << best_score.inlier_number << " & " <<
                     avg_lambda << " & " << lambda_non_random_med << " & " << perc_95 << " & " << (inliers_list.size() - lower_than_per) << " & " <<
                         // ut::str(cdf_lambda,4)
                         std::to_string(cdf_lambda).substr(0, std::to_string(cdf_lambda).find('.')+5)
@@ -990,40 +911,33 @@ public:
 //                           << " max inls ransac " << best_score.inlier_number << " cdf " << cdf_lambda << " tested models " << num_total_tested_models << " cdf^N " << cdf_N <<
 //                           " final iters " << final_iters << " / " << params.getMaxIters() << " is random " << is_random << '\n';
              }
-//            else {
-//                std::cout << "OK. non random inls best model " << non_random_inls_best_model << '\n';
-//            }
         }
 //        std::cout << "time test " << std::chrono::duration_cast<std::chrono::microseconds>
 //                (std::chrono::steady_clock::now() - begin_time_test).count() << "\n";
-//std::cout << "est modls " << num_total_tested_models << " sftb " << num_so_far_the_best << '\n';
 #if DEBUG
         std::cout << "iters " << final_iters << ", times: est " << est_time << " eval " << eval_time << " lo " << lo_time << 
             " degen time " << degensac_time << " pol time " << polisher_time << ", #LO " << num_lo_runs << " #SFTB " << num_so_far_the_best <<
             " #tested models " << num_total_tested_models << "ransac time " << std::chrono::duration_cast<std::chrono::microseconds>
                 (std::chrono::steady_clock::now() - begin_time).count() << '\n';
 #endif
-        // Store results
         ransac_output = ::vsac::Output(best_model, inliers_mask, best_score.inlier_number, final_iters, is_random, residuals);
         return true;
     }
 };
 
-int getNumberOfNonRandomInliers (double scale, const Mat &points, bool is_F, const Mat &model,
-        bool has_sample, const std::vector<int> &sample, const std::vector<int> &inliers_, const int num_inliers_) {
+int getNumberOfNonRandomInliers (double scale, const Mat &points, bool is_F, const Mat &model, bool has_sample,
+        const std::vector<int> &sample, const std::vector<int> &inliers_, const int num_inliers_) {
     int num_inliers = num_inliers_;
     if (num_inliers == 0) return 0;
     std::vector<int> inliers= inliers_;
     const auto * const pts = (float *) points.data;
-     const double ep_thr_sqr = 1e-6, line_thr = scale*0.01, /*5*/ neigh_thr_sqr = scale * 10; //scale * 9, 50
-//    const double ep_thr_sqr = 1e-5, line_thr = scale*0.1, /*5*/ neigh_thr_sqr = scale * 100; //scale * 9, 50
-    int  num_pts_bad_conditioning = 0, num_pts_near_ep = 0,
+    const double ep_thr_sqr = 1e-6, line_thr = scale*0.01, /*5*/ neigh_thr_sqr = scale * 10; //scale * 9, 50
+    int num_pts_bad_conditioning = 0, num_pts_near_ep = 0,
         num_pts_on_ep_lines = 0, num_pts_validatin_or_constr = 0, pt1 = 0;
     const int sample_size = is_F ? 7 : 4;
-    double sign1 = 0, a1=0, b1=0, c1=0, a2=0, b2=0, c2=0;
+    double sign1 = 0, a1=0, b1=0, c1=0, a2=0, b2=0, c2=0, ep1_x, ep1_y, ep2_x, ep2_y;
     const auto * const m = (double *) model.data;
     Vec3d ep1;
-    double ep1_x, ep1_y, ep2_x, ep2_y;
     bool do_or_test = false, ep1_inf = false, ep2_inf = false;
     if (is_F) { // compute epipole and sign of the first point for orientation test
         ep1 = model.row(0).cross(model.row(2));
@@ -1077,9 +991,8 @@ int getNumberOfNonRandomInliers (double scale, const Mat &points, bool is_F, con
                 }
             }
         }
-        if (num_sample_in_inliers < sample_size) {
+        if (num_sample_in_inliers < sample_size)
             num_sample_in_inliers = sample_size; // for good model a few points does not matter, for bad could be decisive
-        }
     } else num_sample_in_inliers = sample_size;
 
     if (is_F) {
@@ -1102,7 +1015,6 @@ int getNumberOfNonRandomInliers (double scale, const Mat &points, bool is_F, con
         }
     }
 
-
     // verification does not include sample points as they surely random
     const int max_verify = num_inliers - num_sample_in_inliers;
     if (max_verify <= 0)
@@ -1122,10 +1034,8 @@ int getNumberOfNonRandomInliers (double scale, const Mat &points, bool is_F, con
                 a1 = m[0] * x2 + m[3] * y2 + m[6];
                 b1 = m[1] * x2 + m[4] * y2 + m[7];
                 c1 = m[2] * x2 + m[5] * y2 + m[8];
-//            std::cout << a2 * a2 + b2 * b2 + c2 * c2 << " " << a1 * a1 + b1 * b1 + c1 * c1 << " dist ep " << (x1-ep1_x)*(x1-ep1_x)+(y1-ep1_y)*(y1-ep1_y) << " " <<  (x2-ep2_x)*(x2-ep2_x)+(y2-ep2_y)*(y2-ep2_y)<< "\n";
                 if ((!ep1_inf && (x1-ep1_x)*(x1-ep1_x)+(y1-ep1_y)*(y1-ep1_y) < neigh_thr_sqr) ||
                     (!ep2_inf && (x2-ep2_x)*(x2-ep2_x)+(y2-ep2_y)*(y2-ep2_y) < neigh_thr_sqr)) {
-//                std::cout << "inl " << inliers[i] << "near ep\n";
                     num_non_random_inliers--;
                     num_pts_near_ep++;
                     continue; // is dependent, continue to the next point
@@ -1151,7 +1061,6 @@ int getNumberOfNonRandomInliers (double scale, const Mat &points, bool is_F, con
                 const int inl_idx_j = 4*inliers[j];
                 const double X1 = pts[inl_idx_j], Y1 = pts[inl_idx_j+1], X2 = pts[inl_idx_j+2], Y2 = pts[inl_idx_j+3];
                 const double dx1 = X1-x1, dy1 = Y1-y1, dx2 = X2-x2, dy2 = Y2-y2;
-//            std::cout << inliers[i] << " to " << inliers[j] << " dists "<< dx1 * dx1 + dy1 * dy1 << " " << dx2 * dx2 + dy2 * dy2 << "\n";
                 if (dx1 * dx1 + dy1 * dy1 < neigh_thr_sqr || dx2 * dx2 + dy2 * dy2 < neigh_thr_sqr) {
                     num_non_random_inliers--;
                     num_pts_bad_conditioning++;
@@ -1171,14 +1080,9 @@ int getNumberOfNonRandomInliers (double scale, const Mat &points, bool is_F, con
     const bool is_pts_vald_constr_normal = (double)num_pts_validatin_or_constr / num_inliers < 0.6;
     const bool is_pts_near_ep_normal = (double)num_pts_near_ep / num_inliers < 0.6;
     if (!is_pts_near_ep_normal || !is_pts_vald_constr_normal) {
-//        std::cout << "Something not normal " << is_pts_vald_constr_normal << " " <<is_pts_near_ep_normal <<", recompute\n";
-//    std::cout << "Before: non-rand " << num_non_random_inliers << " pts valid or constr " << num_pts_validatin_or_constr << " near ep " << num_pts_near_ep << " close " << num_pts_bad_conditioning
-//              << " on ep lines " << num_pts_on_ep_lines << " in sample " << num_sample_in_inliers << " input inliers " <<num_inliers << "\n";
         num_non_random_inliers = max_verify;
         num_pts_bad_conditioning = 0; num_pts_near_ep = 0; num_pts_on_ep_lines = 0; num_pts_validatin_or_constr = 0;
         removeDependentPoints(is_pts_vald_constr_normal, is_pts_near_ep_normal);
-//    std::cout << "After: non-rand " << num_non_random_inliers << " pts valid or constr " << num_pts_validatin_or_constr << " near ep " << num_pts_near_ep << " close " << num_pts_bad_conditioning
-//              << " on ep lines " << num_pts_on_ep_lines << " in sample " << num_sample_in_inliers << " input inliers " <<num_inliers << "\n";
     }
     return num_non_random_inliers;
 }
@@ -1317,14 +1221,16 @@ bool estimate (const Params &params, cv::InputArray points1, cv::InputArray poin
     switch (params.getFinalPolisher()) {
         case PolishingMethod::CovPolisher:
             if (params.isFundamental()) {
-                cov_polisher = cv::vsac::CovarianceFundamentalSolver::create(points);
+                cov_polisher = cv::vsac::CovarianceEpipolarSolver::create(points, true);
             } else if (params.isHomography()) {
                 cov_polisher = cv::vsac::CovarianceHomographySolver::create(points);
             } else if (params.isEssential()) {
-                cov_polisher = cv::vsac::CovarianceEssentialSolver::create(calib_points);
+                cov_polisher = cv::vsac::CovarianceEpipolarSolver::create(calib_points, false);
                 if (! params.isEnforceRank())
                     cov_polisher->setEnforceRankConstraint(false);
-            } else if (params.getEstimator() == EstimationMethod::Affine || params.isPnP()) {
+            } else if (params.getEstimator() == EstimationMethod::Affine) {
+                cov_polisher = cv::vsac::CovarianceAffineSolver::create(points);
+            } else if (params.isPnP()) {
                 polisher = cv::vsac::LeastSquaresPolishing::create(estimator, quality, params.getFinalLSQIterations()); // use lsq polisher here
                 break;
             } else assert(false && "covariance polisher not implemented\n");
@@ -1349,7 +1255,6 @@ bool estimate (const Params &params, cv::InputArray points1, cv::InputArray poin
     const bool is_parallel = params.isParallel();
     cv::vsac::VSAC ransac (points, params, points_size, estimator, quality, sampler,
                            termination, verifier, degeneracy, lo, polisher, is_parallel, state);
-
     if (is_parallel)
         ransac.setDataForParallel (threshold, max_thr, K1, K2, calib_points, image_points, graph, layers, close_pts_mask);
     return ransac.run(output);

@@ -6,17 +6,17 @@ private:
 	const Mat &points;
 	const float * const pts;
 public:
-	TrifocalTensorMinimalSolverImpl (const Mat &points_) : points(points_),
+	explicit TrifocalTensorMinimalSolverImpl (const Mat &points_) : points(points_),
 		pts((float *) points.data) {}
 
-	cv::Vec3d getNullVector (const cv::Mat &M) {
+	static cv::Vec3d getNullVector (const cv::Mat &M) {
 		cv::Matx33d u, vt;
 		cv::Vec3d d;
 		cv::SVDecomp(M, d, u, vt);
 		return cv::Vec3d(vt(2,0), vt(2,1), vt(2,2));
 	}
 
-	void getTandEpipoles (const Mat &tensor, std::vector<cv::Matx33d> &T, cv::Vec3d &e_prime, cv::Vec3d &e_prime_prime) {
+	static void getTandEpipoles (const Mat &tensor, std::vector<cv::Matx33d> &T, cv::Vec3d &e_prime, cv::Vec3d &e_prime_prime) {
 		T = std::vector<cv::Matx33d> (3);
 		int cnt = 0;
 		const auto * const ten = (double *) tensor.data;
@@ -39,7 +39,7 @@ public:
 		e_prime /= norm(e_prime);
 		e_prime_prime /= norm(e_prime_prime);
 	}
-	void getFundamentalMatricesFromTensor (const cv::Mat &tensor, cv::Mat &F21, cv::Mat &F31) {
+	void getFundamentalMatricesFromTensor (const cv::Mat &tensor, cv::Mat &F21, cv::Mat &F31) override {
 		// F21 = [e′]×[T1, T2, T3]e′′ and F31 = [e′′]×[T1^T , T2^T , T3^T ]e′.
 		cv::Vec3d e_prime, e_prime_prime;
 		std::vector<cv::Matx33d> T;
@@ -56,7 +56,7 @@ public:
 		}
 	}
 
-	void getProjectionsFromTensor (const cv::Mat &tensor, cv::Matx34d &P2, cv::Matx34d &P3) {
+	static void getProjectionsFromTensor (const cv::Mat &tensor, cv::Matx34d &P2, cv::Matx34d &P3) {
 		cv::Vec3d a4, b4;
 		std::vector<cv::Matx33d> T;
 		getTandEpipoles(tensor, T, a4, b4);
@@ -86,7 +86,7 @@ public:
 				     l4 = -cv::determinant(cv::Matx33d(a[0], a[1], a[2],
 	    											   b[0], b[1], b[2],
 	    											   c[0], c[1], c[2]));
-	    return cv::Matx14d (l1, l2, l3, l4);
+	    return {l1, l2, l3, l4};
 	}
 
 	int estimate(const std::vector<int> &sample, std::vector<cv::Mat> &tensor) const override {
@@ -95,16 +95,13 @@ public:
 			B = cv::Matx33d (pts[6*sample[0]+2*img  ], pts[6*sample[1]+2*img  ], pts[6*sample[2]+2*img  ],
 				  		     pts[6*sample[0]+2*img+1], pts[6*sample[1]+2*img+1], pts[6*sample[2]+2*img+1],
 						     1, 1, 1);
-			// std::cout << B << "\n";
-			cv::Vec3d x4 (pts[6*sample[3]+2*img], pts[6*sample[3]+2*img+1], 1);		
+			cv::Vec3d x4 (pts[6*sample[3]+2*img], pts[6*sample[3]+2*img+1], 1);
 			const auto lambda = B.inv() * x4;
-			// std::cout << "lambda " << lambda << "\n";
 			cv::Mat B_ (3, 3, CV_64F, B.val);
 			B_.col(0) *= lambda[0];
 			B_.col(1) *= lambda[1];
 			B_.col(2) *= lambda[2];
 			B = B.inv();
-			// std::cout << B << "\n";
 			X5 = B * cv::Vec3d(pts[6*sample[4]+2*img], pts[6*sample[4]+2*img+1], 1);
 			X6 = B * cv::Vec3d(pts[6*sample[5]+2*img], pts[6*sample[5]+2*img+1], 1);
 
@@ -162,7 +159,6 @@ public:
 	    cv::Vec3d roots;
 	    const int nroots = cv::solveCubic (coeffs, roots);
 	    if (nroots < 1) return 0;
-	    double t1, t2, t3, t4, t5;
 
 	    auto getP = [&] (int img, double XbyW, double YbyW, double ZbyW) {
 		    const double x5 = X5s[img][0], y5 = X5s[img][1], w5 = X5s[img][2], x6 = X6s[img][0], y6 = X6s[img][1], w6 = X6s[img][2];
@@ -182,24 +178,20 @@ public:
 	    tensor = std::vector<cv::Mat> (nroots);
 	    for (int r = 0; r < nroots; r++) {
 	    	const auto root = roots[r];
-	    	const double t1 = a1 + root * b1;
-				    	 t2 = a2 + root * b2;
-				     	 t3 = a3 + root * b3;
-				    	 t4 = a4 + root * b4;
+	    	const double t1 = a1 + root * b1,
+				    	 t2 = a2 + root * b2,
+				     	 t3 = a3 + root * b3,
+				    	 t4 = a4 + root * b4,
 				    	 t5 = a5 + root * b5;
 
 		    const double XbyW = (t4-t5)/(t2-t3),
 		    			 YbyW = t4/(t1-t3),
 		  				 ZbyW = t5/(t1-t2);
 
-		  	// std::cout << XbyW << " " << YbyW << " " << ZbyW << "\n";
-
 		  	cv::Matx34d P1 = getP(0, XbyW, YbyW, ZbyW);
 		  	cv::Matx34d P2 = getP(1, XbyW, YbyW, ZbyW);
 		  	cv::Matx34d P3 = getP(2, XbyW, YbyW, ZbyW);
 		  	cv::Mat P = cv::Mat(P1);
-
-		  	// std::cout << P1 << "\n" << P2 << "\n" << P3 << "\n-------------\n";
 
 		  	cv::Matx44d H;
 		  	cv::vconcat(P1, cross4(P.row(0), P.row(1), P.row(2)), H);
@@ -210,14 +202,10 @@ public:
 
 		  	tensor[r] = cv::Mat_<double>(27,1);
 		  	auto * ten = (double *)tensor[r].data;
-		  	for (int i = 0; i < 3; i++) {
-		  		for (int j = 0; j < 3; j++) {
-		  			for (int k = 0; k < 3; k++) {
-		  				// t[i][j][k] = P2(j,i)*P3(k,3) - P2(j,3)*P3(k,i);
+		  	for (int i = 0; i < 3; i++)
+		  		for (int j = 0; j < 3; j++)
+		  			for (int k = 0; k < 3; k++)
 		  				(*ten++) = P2(j,i)*P3(k,3) - P2(j,3)*P3(k,i);
-		  			}
-		  		}
-		  	}
 	    }
 	    return nroots;
 	}
@@ -236,26 +224,24 @@ private:
     float m11, m12, m13, m21, m22, m23, m31, m32, m33;
     std::vector<float> errors;
 public:
-	TrifocalTensorReprErrorImpl (const Mat &points_) :
-		points_mat(&points_), points ((float*) points_.data), errors(points_.rows) {}
+	explicit TrifocalTensorReprErrorImpl (const Mat &points_) :
+		points_mat(&points_), points ((float*) points_.data), errors(points_.rows)
+        , m11(0), m12(0), m13(0), m21(0), m22(0), m23(0), m31(0), m32(0), m33(0) {}
     void setModelParameters (const Mat &model) override {
     	const auto * const m = (double *) model.data;
     	int cnt = 0;
-    	for (int i = 0; i < 3; i++) {
-    		for (int j = 0; j < 3; j++) {
-    			for (int k = 0; k < 3; k++) {
-    				tensor[i][j][k] = m[cnt++];
-    			}
-    		}
-    	}
+    	for (auto & i : tensor)
+    		for (auto & j : i)
+    			for (double & k : j)
+    				k = m[cnt++];
     }
     float getError (int pidx) const override {
     	pidx *= 6;
-    	const double x1 = points[pidx  ], y1 = points[pidx+1],
-    				 x2 = points[pidx+2], y2 = points[pidx+3];
-    	const double z3_ =                   x2 * (x1 * tensor[0][1][2] + y1 * tensor[1][1][2] + tensor[2][1][2]) - y2 * (x1 * tensor[0][0][2] + y1 * tensor[1][0][2] + tensor[2][0][2]);
-    	const double dx3 = points[pidx+4] - (x2 * (x1 * tensor[0][1][0] + y1 * tensor[1][1][0] + tensor[2][1][0]) - y2 * (x1 * tensor[0][0][0] + y1 * tensor[1][0][0] + tensor[2][0][0])) / z3_;
-    	const double dy3 = points[pidx+5] - (x2 * (x1 * tensor[0][1][1] + y1 * tensor[1][1][1] + tensor[2][1][1]) - y2 * (x1 * tensor[0][0][1] + y1 * tensor[1][0][1] + tensor[2][0][1])) / z3_;
+    	const auto x1 = points[pidx  ], y1 = points[pidx+1],
+    			   x2 = points[pidx+2], y2 = points[pidx+3];
+    	const auto z3_ =                   x2 * (x1 * tensor[0][1][2] + y1 * tensor[1][1][2] + tensor[2][1][2]) - y2 * (x1 * tensor[0][0][2] + y1 * tensor[1][0][2] + tensor[2][0][2]);
+    	const auto dx3 = points[pidx+4] - (x2 * (x1 * tensor[0][1][0] + y1 * tensor[1][1][0] + tensor[2][1][0]) - y2 * (x1 * tensor[0][0][0] + y1 * tensor[1][0][0] + tensor[2][0][0])) / z3_;
+    	const auto dy3 = points[pidx+5] - (x2 * (x1 * tensor[0][1][1] + y1 * tensor[1][1][1] + tensor[2][1][1]) - y2 * (x1 * tensor[0][0][1] + y1 * tensor[1][0][1] + tensor[2][0][1])) / z3_;
     	return dx3 * dx3 + dy3 * dy3;
 	}
     const std::vector<float> &getErrors (const Mat &model) override {

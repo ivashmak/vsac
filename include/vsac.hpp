@@ -27,16 +27,6 @@ public:
     static Ptr<ReprojectionErrorForward> create(const Mat &points);
 };
 
-class FundamentalAlgebraicError : public Error {
-public:
-    static Ptr<FundamentalAlgebraicError> create(const Mat &points);
-};
-
-class FundamentalGeometricError : public Error {
-public:
-    static Ptr<FundamentalGeometricError> create(const Mat &points);
-};
-
 // Sampson Error for Fundamental matrix
 class SampsonError : public Error {
 public:
@@ -101,10 +91,6 @@ class HomographySVDSolver : public MinimalSolver {
 public:
     static Ptr<HomographySVDSolver> create (const Mat &points);
 };
-class EssentialMinimalSolverStewenius5ptsSVD : public MinimalSolver {
-public:
-    static Ptr<EssentialMinimalSolverStewenius5ptsSVD> create (const Mat &points);
-};
 class FundamentalSVDSolver : public MinimalSolver {
 public:
     static Ptr<FundamentalSVDSolver> create (const Mat &points);
@@ -128,7 +114,7 @@ public:
 //-------------------------- ESSENTIAL MATRIX -----------------------
 class EssentialMinimalSolverStewenius5pts : public MinimalSolver {
 public:
-    static Ptr<EssentialMinimalSolverStewenius5pts> create(const Mat &points_);
+    static Ptr<EssentialMinimalSolverStewenius5pts> create(const Mat &points, bool use_svd);
 };
 
 //-------------------------- PNP -----------------------
@@ -174,20 +160,18 @@ public:
 //-------------------------- HOMOGRAPHY MATRIX -----------------------
 class HomographyNonMinimalSolver : public NonMinimalSolver {
 public:
-    static Ptr<HomographyNonMinimalSolver> create(const Mat &points_, bool norm_in_advance=false);
+    static Ptr<HomographyNonMinimalSolver> create(const Mat &points_);
+    static Ptr<HomographyNonMinimalSolver> create(const Mat &points_, const Matx33d &T1, const Matx33d &T2);
 };
 
 //-------------------------- FUNDAMENTAL MATRIX -----------------------
-class FundamentalNonMinimalSolver : public NonMinimalSolver {
+class EpipolarNonMinimalSolver : public NonMinimalSolver {
 public:
-    static Ptr<FundamentalNonMinimalSolver> create(const Mat &points_, bool norm_in_advance=false);
+    static Ptr<EpipolarNonMinimalSolver> create(const Mat &points_, bool is_fundamental);
+    static Ptr<EpipolarNonMinimalSolver> create(const Mat &points_, const Matx33d &T1, const Matx33d &T2);
 };
 
 //-------------------------- ESSENTIAL MATRIX -----------------------
-class EssentialNonMinimalSolver : public NonMinimalSolver {
-public:
-    static Ptr<EssentialNonMinimalSolver> create(const Mat &points_);
-};
 class EssentialNonMinimalSolverViaF : public NonMinimalSolver {
 public:
 static Ptr<EssentialNonMinimalSolverViaF> create(const Mat &points_, const cv::Mat &K1, const Mat &K2);
@@ -196,11 +180,6 @@ static Ptr<EssentialNonMinimalSolverViaF> create(const Mat &points_, const cv::M
 class EssentialNonMinimalSolverViaT : public NonMinimalSolver {
 public:
     static Ptr<EssentialNonMinimalSolverViaT> create(const Mat &points_);
-};
-
-class EssentialNonMinimalSolverViaR : public NonMinimalSolver {
-public:
-    static Ptr<EssentialNonMinimalSolverViaR> create(const Mat &points_);
 };
 
 //-------------------------- PNP -----------------------
@@ -220,7 +199,6 @@ public:
     static Ptr<AffineNonMinimalSolver> create(const Mat &points_);
 };
 
-//////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////// SCORE ///////////////////////////////////////////
 class Score {
 public:
@@ -262,9 +240,7 @@ public:
      * @model: Mat current model, e.g., H matrix.
      */
     virtual Score getScore (const Mat &model) const = 0;
-    virtual Score getScore (const std::vector<float> &/*errors*/) const {
-        CV_Error(cv::Error::StsNotImplemented, "getScore(errors)");
-    }
+    virtual Score getScore (const std::vector<float> &/*errors*/) const = 0;
     // get @inliers of the @model. Assume threshold is given
     // @inliers must be preallocated to maximum points size.
     virtual int getInliers (const Mat &model, std::vector<int> &inliers) const = 0;
@@ -353,11 +329,7 @@ public:
     virtual void filterInliers (const cv::Mat &F, std::vector<bool> &inliers_mask) const { }
     virtual int filterInliers (const cv::Mat &F, std::vector<int> &inliers, int num_inliers) const { return num_inliers; }
     virtual void getBestKRt (Mat &K_, Mat &R_, Mat &t_) const {}
-    virtual bool arePlanarPointsHarmful() const { return false; }
-    virtual bool isDecisionable() const { return true; }
     virtual void setClosePointsMask (const std::vector<std::vector<int>> &) {}
-    virtual bool isDegenerate (const Mat &model) { return false; }
-    virtual int getNumberOfNonPlanarPoints () const { return 0; }
     virtual const Mat &getHomography () const { return homogr; }
     virtual const std::vector<int> &getNonPlanarPoints () const { return good_sample; }
 };
@@ -381,10 +353,11 @@ public:
 class FundamentalDegeneracy : public EpipolarGeometryDegeneracy {
 public:
     virtual void setPrincipalPoint (double px_, double py_) = 0;
+    virtual void setPrincipalPoint (double px_, double py_, double px2_, double py2_) = 0;
     virtual bool verifyFundamental (const Mat &F_best, const Score &F_score, const std::vector<bool> &inliers_mask, cv::Mat &F_new, Score &new_score) = 0;
     static Ptr<FundamentalDegeneracy> create (int state, const Ptr<Quality> &quality_,
         const Mat &points_, int sample_size_, int max_iters_plane_and_parallax,
-        double homography_threshold, const Mat true_K1=Mat(), const Mat true_K2=Mat(), bool old_degensac_=false);
+        double homography_threshold, double f_inlier_thr_sqr, const Mat true_K1=Mat(), const Mat true_K2=Mat());
 };
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -465,8 +438,6 @@ public:
     // update verifier by given inlier number
     virtual void update (int highest_inlier_number) = 0;
     virtual void updateSPRT (double time_model_est, double time_corr_ver, double new_avg_models, double new_delta, double new_epsilon, const Score &best_score) = 0;
-    virtual const std::vector<float> &getErrors() const = 0;
-    virtual bool hasErrors () const = 0;
     static Ptr<ModelVerifier> create();
 };
 
@@ -661,12 +632,14 @@ namespace Utils {
     double intersectionOverUnion (const std::vector<bool> &a, const std::vector<bool> &b);
     void triangulatePoints (const Mat &points, const Mat &E_, const Mat &K1, const Mat &K2, Mat &points3D, Mat &R, Mat &t,
         std::vector<bool> &good_mask, std::vector<double> &depths1, std::vector<double> &depths2);
-    void triangulatePoints (bool calibrated, const Mat &points, const Mat &E_, Mat &new_points, Mat &points3D, Mat &R);
+    void triangulatePoints (const Mat &E, const Mat &points1, const Mat &points2,  Mat &corr_points1, Mat &corr_points2,
+               const Mat &K1, const Mat &K2, Mat &points3D, Mat &R, Mat &t, const std::vector<bool> &good_point_mask);
     int triangulatePointsRt (const Mat &points, Mat &points3D, const Mat &K1_, const Mat &K2_, 
         const cv::Mat &R, const cv::Mat &t_vec, std::vector<bool> &good_mask, std::vector<double> &depths1, std::vector<double> &depths2);
     int decomposeHomography (const Matx33d &Hnorm, std::vector<Matx33d> &R, std::vector<Vec3d> &t);
     double getPoissonCDF (double lambda, int tentative_inliers);
     void getClosePoints (const cv::Mat &points, std::vector<std::vector<int>> &close_points, double close_thr_sqr);
+    bool satisfyCheirality (const cv::Matx33d& R, const cv::Vec3d &t, const cv::Vec3d &x1, const cv::Vec3d &x2);
 }
 namespace Math {
     // return skew symmetric matrix
@@ -763,7 +736,7 @@ public:
     static Ptr<SimpleLocalOptimization> create 
         (const Ptr<Degeneracy> &degen, const Ptr<Quality> &quality_, const Ptr<Estimator> &estimator_,
          const Ptr<Termination> termination_, const Ptr<RandomGenerator> &random_gen,
-         int max_lo_iters_);
+         int max_lo_iters_, double inlier_thr_sqr);
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -790,22 +763,20 @@ public:
                   const std::vector<double> &weights) = 0;
     virtual void reset() = 0;
 };
-class CovarianceFundamentalSolver : public CovarianceSolver {
+class CovarianceEpipolarSolver : public CovarianceSolver {
 public:
-    static Ptr<CovarianceFundamentalSolver> create (const Mat &points);
+    static Ptr<CovarianceEpipolarSolver> create (const Mat &points, bool is_fundamental);
+    static Ptr<CovarianceEpipolarSolver> create (const Mat &points, const Matx33d &T1, const Matx33d &T2);
 };
 class CovarianceHomographySolver : public CovarianceSolver {
 public:
     static Ptr<CovarianceHomographySolver> create (const Mat &points);
+    static Ptr<CovarianceHomographySolver> create (const Mat &points, const Matx33d &T1, const Matx33d &T2);
 };
-class CovarianceEssentialSolver : public CovarianceSolver {
+class CovarianceAffineSolver : public CovarianceSolver {
 public:
-    static Ptr<CovarianceEssentialSolver> create (const Mat &points);
+    static Ptr<CovarianceAffineSolver> create (const Mat &points);
 };
-//class CovarianceAffineSolver : public CovarianceSolver {
-//public:
-//    static Ptr<CovarianceAffineSolver> create (const Mat &points);
-//};
 
 class CovariancePolisher : public FinalModelPolisher {
 public:
@@ -830,8 +801,14 @@ public:
         const Ptr<Quality> &quality_, int lsq_iterations);
 };
 
-void saveMask (OutputArray mask, const std::vector<bool> &inliers_mask);
+/*
+ * pts1, pts2 are matrices either N x a, N x b or a x N or b x N, where N > a and N > b
+ * pts1 are image points, if `ispnp` pts2 are object points otherwise - image points as well.
+ * output is matrix of size N x (a + b)
+ * return: points_size = N
+ */
 int mergePoints (InputArray pts1_, InputArray pts2_, Mat &pts, bool ispnp);
+// returns number of non-random inliers
 int getNumberOfNonRandomInliers (double scale, const Mat &points, bool is_F, const Mat &model,
         bool has_sample, const std::vector<int> &sample, const std::vector<int> &inliers, const int num_inliers);
 }}

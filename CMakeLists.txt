@@ -69,10 +69,10 @@ add_library(samples ${SRCS_SAMPLES})
 target_link_libraries(samples ${OpenCV_LIBS} src)
 
 ############# add python bindings ##############
-add_definitions(-fPIC)
-add_subdirectory(lib/pybind11)
-pybind11_add_module(pvsac "python/bindings.cpp")
-target_link_libraries(pvsac PRIVATE src)
+#add_definitions(-fPIC)
+#add_subdirectory(lib/pybind11)
+#pybind11_add_module(pvsac "python/bindings.cpp")
+#target_link_libraries(pvsac PRIVATE src)
 ################################################
 
 #add_executable(${PROJECT_NAME} main.cpp)

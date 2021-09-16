@@ -227,7 +227,7 @@ public:
         models = std::vector<Mat>{ Mat_<double>(3,4) };
         Eigen::HouseholderQR<Eigen::Matrix<double, 12, 12>> qr((Eigen::Matrix<double, 12, 12>(AtA)));
         const Eigen::Matrix<double, 12, 12> &Q = qr.householderQ();
-        // extract the last nullspace
+        // extract the last null-vector
         Eigen::Map<Eigen::Matrix<double, 12, 1>>((double *)models[0].data) = Q.col(11);
 #else
         std::cout << "non-minimal SVD, reshape\n";
