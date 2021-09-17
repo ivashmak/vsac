@@ -53,8 +53,8 @@ pybind11::tuple estimate(const vsac::Params &params,
 
 bool getCorrectedPointsHomography
          (const pybind11::array_t<double> &points1, const pybind11::array_t<double> &points2,
-        pybind11::array_t<double> &corr_points1, pybind11::array_t<double> &corr_points2,
-        const pybind11::array_t<double> &H, const pybind11::bind_vector<std::vector<bool>> &good_point_mask) {
+          pybind11::array_t<double> &corr_points1, pybind11::array_t<double> &corr_points2,
+          const pybind11::array_t<double> &H, const pybind11::array_t<bool> &good_point_mask) {
     return false;
 }
 

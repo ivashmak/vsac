@@ -69,10 +69,10 @@ add_library(samples ${SRCS_SAMPLES})
 target_link_libraries(samples ${OpenCV_LIBS} src)
 
 ############# add python bindings ##############
-#add_definitions(-fPIC)
-#add_subdirectory(lib/pybind11)
-#pybind11_add_module(pvsac "python/bindings.cpp")
-#target_link_libraries(pvsac PRIVATE src)
+add_definitions(-fPIC)
+add_subdirectory(lib/pybind11)
+pybind11_add_module(pvsac "python/bindings.cpp")
+target_link_libraries(pvsac PRIVATE src)
 ################################################
 
 #add_executable(${PROJECT_NAME} main.cpp)
@@ -82,11 +82,11 @@ target_link_libraries(samples ${OpenCV_LIBS} src)
 # in case of problems with link errors on linux with filesystem, uncomment the following line
 link_libraries(stdc++fs)
 
-file(GLOB_RECURSE SRCS_TEST "test/*.cpp")
-add_library(tests ${SRCS_TEST})
-target_link_libraries(tests ${OpenCV_LIBS} src)
-add_executable(${PROJECT_NAME} main.cpp ${SRCS_VSAC} ${SRCS_SAMPLES} ${SRCS_EXPS})
-target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS} src samples tests ${lapack_libs})
+#file(GLOB_RECURSE SRCS_TEST "test/*.cpp")
+#add_library(tests ${SRCS_TEST})
+#target_link_libraries(tests ${OpenCV_LIBS} src)
+#add_executable(${PROJECT_NAME} main.cpp ${SRCS_VSAC} ${SRCS_SAMPLES} ${SRCS_EXPS})
+#target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS} src samples tests ${lapack_libs})
 #####################################################
 
 #install(TARGETS src DESTINATION ${CMAKE_INSTALL_PREFIX})
