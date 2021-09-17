@@ -8,6 +8,7 @@ Estimation problems:
 - Perspective projection matrix (3 points P3P, linear 6 points)
 
 Install and run:
+0) ```git submodule update --init```
 1) ```mkdir build && cd build```
 2) ```cmake ..```
 3) ```make -j $nproc```
