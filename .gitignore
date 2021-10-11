@@ -1,0 +1,7 @@
+build
+test
+.idea
+dist
+python/pvsac.egg-info
+deprecated
+
