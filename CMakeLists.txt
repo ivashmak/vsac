@@ -47,7 +47,7 @@ endif (EIGEN3_FOUND)
 # Check opencv libraries
 find_package (OpenCV REQUIRED)
 if (OPENCV_FOUND)
-    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenCV_CXX_FLAGS}")
+    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenCV_CXX_FLAGS} -O3")
     include_directories(${OpenCV_INDLUDE_DIRS})
 else (OPENCV_FOUND)
     message(FATAL_ERROR "OpenCV not found.")
