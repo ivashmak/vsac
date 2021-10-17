@@ -606,7 +606,7 @@ public:
         }
         if (H_best.empty()) return false; // non-degenerate
         getOutliersH(F_best);
-        const bool is_F_degen = isFDegenerate(getNonPlanarSupport(F_best));
+        const bool is_F_degen = true_K_given ? true : isFDegenerate(getNonPlanarSupport(F_best));
 
 #ifdef DEBUG_DEGENSAC
         std::cout << "F final verification: num h outliers " << num_h_outliers << " F non planar support " << F_support << " pts size " << points_size << "\n";
