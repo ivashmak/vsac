@@ -53,12 +53,13 @@ else (OPENCV_FOUND)
     message(FATAL_ERROR "OpenCV not found.")
 endif (OPENCV_FOUND)
 
+add_subdirectory(lib/pybind11)
 # Add source files
 file(GLOB_RECURSE SRCS_VSAC "src/*.cpp")
 file(GLOB_RECURSE SRCS_SAMPLES "samples/*.cpp")
 
 # create libraries
-add_library(lvsac SHARED ${SRCS_VSAC})
+add_library(lvsac ${SRCS_VSAC})
 target_link_libraries(lvsac ${OpenCV_LIBS} ${lapack_libs})
 
 add_library(samples ${SRCS_SAMPLES})
@@ -66,9 +67,9 @@ target_link_libraries(samples ${OpenCV_LIBS} lvsac)
 
 ############# add python bindings ##############
 add_definitions(-fPIC)
-add_subdirectory(lib/pybind11)
+
 pybind11_add_module(pvsac "python/bindings.cpp")
-target_link_libraries(pvsac PRIVATE lvsac)
+target_link_libraries(pvsac PRIVATE pybind11::module lvsac)
 ################################################
 
 add_executable(${PROJECT_NAME} main.cpp)
