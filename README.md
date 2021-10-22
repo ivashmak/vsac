@@ -36,7 +36,7 @@ The VSAC framework enables to add new methods and solvers. To do it you need:
 2) Add a name of your method in the `inlude/vsac.hpp` enum. 
 3) Expand if condition in the `src/init.cpp` to choose your method.
 
-Older VSAC version is intergrated into OpenCV could be run with the following flags:
+Older VSAC version is integrated into OpenCV could be run with the following flags:
 - USAC_PROSAC 
 - USAC_ACCURATE
 - USAC_PARALLEL
