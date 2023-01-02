@@ -42,7 +42,6 @@ public:
     void getEpipoles (const Mat &F, Vec3d &ep1, double &ep1_x, double &ep1_y, double &ep2_x, double &ep2_y) const {
         ep1 = Utils::getRightEpipole(F);
         const Vec3d ep2 = Utils::getLeftEpipole(F);
-        // std::cout << "test ep1 " << norm(F * ep1) << " ep2 " << norm(F.t() * ep2) << '\n';
         if (fabs(ep1[2]) < DBL_EPSILON) {
             ep1_x = DBL_MAX;
             ep1_y = DBL_MAX;
@@ -210,6 +209,60 @@ Ptr<HomographyDegeneracy> HomographyDegeneracy::create (const Mat &points_) {
     return makePtr<HomographyDegeneracyImpl>(points_);
 }
 
+class FundamentalDegeneracyViaEImpl : public FundamentalDegeneracyViaE {
+private:
+    bool is_F_objective;
+    std::vector<std::vector<int>> instances = {{0,1,2,3,4}, {2,3,4,5,6}, {0,1,4,5,6}};
+    std::vector<int> e_sample;
+    const Ptr<Quality> quality;
+    Ptr<EpipolarGeometryDegeneracy> e_degen, f_degen;
+    Ptr<EssentialMinimalSolver5pts> e_solver;
+    std::vector<Mat> e_models;
+    const int E_SAMPLE_SIZE = 5;
+    Matx33d K2_inv_t, K1_inv;
+public:
+    FundamentalDegeneracyViaEImpl (const Ptr<Quality> &quality_, const Mat &pts, const Mat &calib_pts, const Matx33d &K1, const Matx33d &K2, bool is_f_objective)
+            : quality(quality_) {
+        is_F_objective = is_f_objective;
+        e_solver = EssentialMinimalSolver5pts::create(calib_pts, false/*svd*/, true/*nister*/);
+        f_degen = is_F_objective ? EpipolarGeometryDegeneracy::create(pts, 7) : EpipolarGeometryDegeneracy::create(calib_pts, 7);
+        e_degen = EpipolarGeometryDegeneracy::create(calib_pts, E_SAMPLE_SIZE);
+        e_sample = std::vector<int>(E_SAMPLE_SIZE);
+        if (is_f_objective) {
+            K2_inv_t = K2.inv().t();
+            K1_inv = K1.inv();
+        }
+    }
+    bool isModelValid (const Mat &F, const std::vector<int> &sample) const override {
+        return f_degen->isModelValid(F, sample);
+    }
+    bool recoverIfDegenerate (const std::vector<int> &sample_7pt, const Mat &/*best*/, const Score &best_score,
+            Mat &out_model, Score &out_score) override {
+        out_score = Score();
+        for (const auto &instance : instances) {
+            for (int i = 0; i < E_SAMPLE_SIZE; i++)
+                e_sample[i] = sample_7pt[instance[i]];
+            const int num_models = e_solver->estimate(e_sample, e_models);
+	        for (int i = 0; i < num_models; i++) {
+                if (e_degen->isModelValid(e_models[i], e_sample)) {
+                    const Mat model = is_F_objective ? Mat(K2_inv_t * Matx33d(e_models[i]) * K1_inv) : e_models[i];
+                    const auto sc = quality->getScore(model);
+                    if (sc.isBetter(out_score)) {
+                        out_score = sc;
+                        model.copyTo(out_model);
+                    }
+                }
+            }
+            if (out_score.isBetter(best_score)) break;
+        }
+        return true;
+    }
+};
+Ptr<FundamentalDegeneracyViaE> FundamentalDegeneracyViaE::create (const Ptr<Quality> &quality, const Mat &pts,
+                                              const Mat &calib_pts, const Matx33d &K1, const Matx33d &K2, bool is_f_objective) {
+    return makePtr<FundamentalDegeneracyViaEImpl>(quality, pts, calib_pts, K1, K2, is_f_objective);
+}
+
 class FundamentalDegeneracyImpl : public FundamentalDegeneracy {
 private:
     RNG rng;
@@ -219,29 +272,26 @@ private:
     const float * const points;
     const Mat * points_mat;
     const Ptr<ReprojectionErrorForward> h_reproj_error;
+    Ptr<EpipolarNonMinimalSolver> f_non_min_solver;
     Ptr<HomographyNonMinimalSolver> h_non_min_solver;
     Ptr<UniformRandomGenerator> random_gen_H;
     const EpipolarGeometryDegeneracyImpl ep_deg;
     // threshold to find inliers for homography model
-    const double homography_threshold, log_conf = log(0.05), MAX_H_THR = 225/*15^2*/;
+    const double homography_threshold, log_conf = log(0.05), H_SAMPLE_THR_SQR = 49/*7^2*/, MAX_H_THR = 225/*15^2*/;
     double f_threshold_sqr, best_focal = -1;
     // points (1-7) to verify in sample
     std::vector<std::vector<int>> h_sample {{0,1,2},{3,4,5},{0,1,6},{3,4,6},{2,5,6}};
-    std::vector<int> h_inliers, h_outliers, new_h_outliers, plane_parallax_H_sample;
+    std::vector<std::vector<int>> h_sample_ver {{3,4,5,6},{0,1,2,6},{2,3,4,5},{0,1,2,5},{0,1,3,4}};
+    std::vector<int> non_planar_supports, h_inliers, h_outliers, h_outliers_eval, f_inliers;
     std::vector<double> weights;
     std::vector<Mat> h_models;
-    const int points_size, sample_size, max_iters_plane_and_parallax, TENT_MIN_NON_PLANAR_SUPP = 10, MAX_H_SUBSET = 50, MAX_ITERS_H = 6;
+    const int points_size, sample_size, max_iters_plane_and_parallax, MAX_H_SUBSET = 50, MAX_ITERS_H = 6;
+    int num_h_outliers, num_models_used_so_far = 0, estimated_min_non_planar_support,
+        num_h_outliers_eval, TENT_MIN_NON_PLANAR_SUPP;
     const int MAX_MODELS_TO_TEST = 21, H_INLS_DEGEN_SAMPLE = 5; // 5 by DEGENSAC, Chum et al.
-    std::vector<int> non_planar_supports;
-    // int first_sample_pt = 0;
-    // re-estimate for every H
-    int num_h_outliers, num_models_used_so_far = 0, estimated_min_non_planar_support = TENT_MIN_NON_PLANAR_SUPP,
-        plane_parallax_H_sample_size;
     Matx33d K, K2, K_inv, K2_inv, K2_inv_t, true_K2_inv, true_K2_inv_t, true_K1_inv, true_K1, true_K2_t;
-    Mat H_best;
-    Score H_best_score, best_focal_score;
+    Score best_focal_score;
     bool true_K_given, is_principal_pt_set = false;
-    std::vector<std::vector<int>> close_pts_mask;
 public:
     FundamentalDegeneracyImpl (int state, const Ptr<Quality> &quality_, const Mat &points_,
                 int sample_size_, int plane_and_parallax_iters, double homography_threshold_,
@@ -253,21 +303,21 @@ public:
             max_iters_plane_and_parallax(plane_and_parallax_iters) {
         if (sample_size_ == 8) {
             // add more homography samples to test for 8-points F
-            h_sample.emplace_back(std::vector<int>{0, 1, 7});
-            h_sample.emplace_back(std::vector<int>{0, 2, 7});
-            h_sample.emplace_back(std::vector<int>{3, 5, 7});
-            h_sample.emplace_back(std::vector<int>{3, 6, 7});
-            h_sample.emplace_back(std::vector<int>{2, 4, 7});
+            h_sample.emplace_back(std::vector<int>{0, 1, 7}); h_sample_ver.emplace_back(std::vector<int>{2,3,4,5,6});
+            h_sample.emplace_back(std::vector<int>{0, 2, 7}); h_sample_ver.emplace_back(std::vector<int>{1,3,4,5,6});
+            h_sample.emplace_back(std::vector<int>{3, 5, 7}); h_sample_ver.emplace_back(std::vector<int>{0,1,2,4,6});
+            h_sample.emplace_back(std::vector<int>{3, 6, 7}); h_sample_ver.emplace_back(std::vector<int>{0,1,2,4,5});
+            h_sample.emplace_back(std::vector<int>{2, 4, 7}); h_sample_ver.emplace_back(std::vector<int>{0,1,3,5,6});
         }
         non_planar_supports = std::vector<int>(MAX_MODELS_TO_TEST);
         h_inliers = std::vector<int>(points_size);
         h_outliers = std::vector<int>(points_size);
-        new_h_outliers = std::vector<int>(points_size);
-        plane_parallax_H_sample = std::vector<int>(points_size);
+        h_outliers_eval = std::vector<int>(points_size);
+        f_inliers = std::vector<int>(points_size);
         h_non_min_solver = HomographyNonMinimalSolver::create(points_);
-        num_h_outliers = points_size;
+        f_non_min_solver = EpipolarNonMinimalSolver::create(points_, true /*F*/);
+        num_h_outliers_eval = num_h_outliers = points_size;
         f_threshold_sqr = f_inlier_thr_sqr;
-        H_best_score = Score();
         h_repr_quality = MsacQuality::create(points_.rows, homography_threshold_, h_reproj_error);
         true_K_given = ! true_K1_.empty() && ! true_K2_.empty();
         if (true_K_given) {
@@ -275,33 +325,32 @@ public:
             true_K2_inv = Matx33d(Mat(true_K2_.inv()));
             true_K2_t = Matx33d(true_K2_).t();
             true_K1_inv = true_K1.inv();
-            true_K2_inv_t = true_K2_inv.t();            
+            true_K2_inv_t = true_K2_inv.t();
         }
         random_gen_H = UniformRandomGenerator::create(rng.uniform(0, INT_MAX), points_size, MAX_H_SUBSET);
-        plane_parallax_H_sample_size = 0;
+        estimated_min_non_planar_support = TENT_MIN_NON_PLANAR_SUPP = std::min(5, (int)(0.05*points_size));
     }
-    bool estimateHfrom3Points (const Mat &F_best, const std::vector<int> &sample) {
-#ifdef DEBUG_DEGENSAC
-        const auto h_est_time = std::chrono::steady_clock::now();
-#endif
-        H_best_score = Score(); H_best = Mat();
+    bool estimateHfrom3Points (const Mat &F_best, const std::vector<int> &sample, Mat &H_best) {
+        Score H_best_score;
         // find e', null vector of F^T
         const Vec3d e_prime = Utils::getLeftEpipole(F_best);
         const Matx33d A = Math::getSkewSymmetric(e_prime) * Matx33d(F_best);
         bool is_degenerate = false;
+        int idx = -1;
         for (const auto &h_i : h_sample) { // only 5 samples
+            idx++;
             Matx33d H;
-            if (!getH(A, e_prime, 4*sample[h_i[0]], 4*sample[h_i[1]], 4*sample[h_i[2]], H))
+            if (!getH(A, e_prime, 4 * sample[h_i[0]], 4 * sample[h_i[1]], 4 * sample[h_i[2]], H))
                 continue;
             h_reproj_error->setModelParameters(Mat(H));
-            int inliers_in_plane = 0;
-            for (int s = 0; s < sample_size; s++)
-                if (h_reproj_error->getError(sample[s]) < homography_threshold)
+            const auto &ver_pts = h_sample_ver[idx];
+            int inliers_in_plane = 3; // 3 points are always inliers
+            for (int s : ver_pts)
+                if (h_reproj_error->getError(sample[s]) < homography_threshold) {
                     if (++inliers_in_plane >= H_INLS_DEGEN_SAMPLE)
                         break;
-
-            // dangerous if happen that 4 points on plane and all other 3 points are not true correspondonces
-            if (inliers_in_plane >= H_INLS_DEGEN_SAMPLE) { // checks H for non-randomness
+                }
+            if (inliers_in_plane >= H_INLS_DEGEN_SAMPLE) {
                 is_degenerate = true;
                 const auto h_score = h_repr_quality->getScore(Mat(H));
                 if (h_score.isBetter(H_best_score)) {
@@ -310,15 +359,34 @@ public:
                 }
             }
         }
-#ifdef DEBUG_DEGENSAC
-        std::cout << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - h_est_time).count() << " H est time, #inls " << H_best_score.inlier_number << "\n";
-#endif
         if (!is_degenerate)
             return false;
-
-#ifdef DEBUG_DEGENSAC
-        const auto h_opt_time = std::chrono::steady_clock::now();
-#endif
+        int h_inls_cnt = optimizeH(H_best, H_best_score);
+        for (int iter = 0; iter < 2; iter++) {
+            if (h_non_min_solver->estimate(h_inliers, h_inls_cnt, h_models, weights) == 0)
+                break;
+            const auto h_score = h_repr_quality->getScore(h_models[0]);
+            if (h_score.isBetter(H_best_score)) {
+                H_best_score = h_score;
+                h_models[0].copyTo(H_best);
+                h_inls_cnt = h_repr_quality->getInliers(H_best, h_inliers);
+            } else break;
+        }
+        getOutliersH(H_best);
+        return true;
+    }
+    bool optimizeF (const Mat &F, const Score &score, Mat &F_new, Score &new_score) {
+        std::vector<Mat> Fs;
+        if (f_non_min_solver->estimate(f_inliers, quality->getInliers(F, f_inliers), Fs, weights)) {
+            const auto F_polished_score = quality->getScore(f_error->getErrors(Fs[0]));
+            if (F_polished_score.isBetter(score)) {
+                Fs[0].copyTo(F_new); new_score = F_polished_score;
+                return true;
+            }
+        }
+        return false;
+    }
+    int optimizeH (Mat &H_best, Score &H_best_score) {
         int h_inls_cnt = h_repr_quality->getInliers(H_best, h_inliers);
         random_gen_H->setSubsetSize(h_inls_cnt <= MAX_H_SUBSET ? (int)(0.8*h_inls_cnt) : MAX_H_SUBSET);
         if (random_gen_H->getSubsetSize() >= 4/*min H sample size*/) {
@@ -327,9 +395,6 @@ public:
                     continue;
                 const auto h_score = h_repr_quality->getScore(h_models[0]);
                 if (h_score.isBetter(H_best_score)) {
-#ifdef DEBUG_DEGENSAC
-                    // std::cout << "H SCORE UPDATE LO at " << iter << " (" << H_best_score.score << ", " << H_best_score.inlier_number << ") -> (" << h_score.score << ", " << h_score.inlier_number << ")\n";
-#endif
                     h_models[0].copyTo(H_best);
                     // if more inliers than previous best
                     if (h_score.inlier_number > H_best_score.inlier_number || h_score.inlier_number >= MAX_H_SUBSET) {
@@ -340,77 +405,55 @@ public:
                 }
             }
         }
-        for (int iter = 0; iter < 2; iter++) {
-            if (h_non_min_solver->estimate(h_inliers, h_inls_cnt, h_models, weights) == 0)
-                break;
-            const auto h_score = h_repr_quality->getScore(h_models[0]);
-            if (h_score.isBetter(H_best_score)) {
-#ifdef DEBUG_DEGENSAC
-                // std::cout << "H SCORE UPDATE FO at " << iter << " (" << H_best_score.score << ", " << H_best_score.inlier_number << ") -> (" << h_score.score << ", " << h_score.inlier_number << ")\n";
-#endif
-                H_best_score = h_score;
-                h_models[0].copyTo(H_best);
-                h_inls_cnt = h_repr_quality->getInliers(H_best, h_inliers);
-            } else break;
-        }
-#ifdef DEBUG_DEGENSAC
-        std::cout << "H optimization time " << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - h_opt_time).count() << '\n';
-#endif
-        getOutliersH(F_best);
-        return true;
+        return h_inls_cnt;
     }
+
     bool recoverIfDegenerate (const std::vector<int> &sample, const Mat &F_best, const Score &F_best_score,
                               Mat &non_degenerate_model, Score &non_degenerate_model_score) override {
-        if (true_K_given && areSameSingularValues(F_best)) return false;
-//#ifdef DEBUG_DEGENSAC
-//        std::cout << "- - - - - - - - - - - START DEGENSAC #inls " << F_best_score.inlier_number << " - - - - - - - - - - - - - -\n";
-//#endif
         const auto swapF = [&] (const Mat &_F, const Score &_score) {
-            _F.copyTo(non_degenerate_model); non_degenerate_model_score = _score;
+            const auto non_min_solver = EpipolarNonMinimalSolver::create(*points_mat, true);
+            if (! optimizeF(_F, _score, non_degenerate_model, non_degenerate_model_score)) {
+                _F.copyTo(non_degenerate_model);
+                non_degenerate_model_score = _score;
+            }
         };
-        if (! estimateHfrom3Points(F_best, sample)) {
-            // so far H does not exist but maybe appear in the future
-#ifdef DEBUG_DEGENSAC
-            std::cout << "H does not exist, SO-FAR-THE-BEST F IS NOT DEGENERATE\n";
-#endif
+        Mat F_from_H, F_from_E, H_best; Score F_from_H_score, F_from_E_score;
+        if (! estimateHfrom3Points(F_best, sample, H_best)) {
             return false; // non degenerate
         }
-        Mat F_from_K; Score F_from_K_score;
-        if (true_K_given && !getFfromTrueK(H_best, F_from_K, F_from_K_score)) {
-            non_degenerate_model_score = Score();
-            return true; // no translation
-        }
-#ifdef DEBUG_DEGENSAC
-        std::cout << "SFTB F IS DEGEN, NON-PLANAR SUPPORT " << 0 << " SCORE (" << F_best_score.score << ", " << F_best_score.inlier_number << ") H INLIERS " << H_best_score.inlier_number << " H OUTLIERS " << num_h_outliers << "\n";
-#endif
         if (true_K_given) {
-            swapF(F_from_K, F_from_K_score);
-            return true;
+            if (getFfromTrueK(H_best, F_from_H, F_from_H_score)) {
+                if (F_from_H_score.isBetter(F_from_E_score))
+                    swapF(F_from_H, F_from_H_score);
+                else swapF(F_from_E, F_from_E_score);
+                return true;
+            } else {
+                non_degenerate_model_score = Score();
+                return true; // no translation
+            }
         }
-        Score F_calib_score; Mat F_calib;
-        if (calibDegensac(H_best, F_calib, F_calib_score, F_best, F_best_score)) {
+        const int non_planar_support_degen_F = getNonPlanarSupport(F_best);
+        Score F_pl_par_score, F_calib_score; Mat F_pl_par, F_calib;
+        if (calibDegensac(H_best, F_calib, F_calib_score, non_planar_support_degen_F, F_best_score)) {
+            if (planeAndParallaxRANSAC(H_best, h_outliers, num_h_outliers, max_iters_plane_and_parallax, true,
+                    F_best_score, non_planar_support_degen_F, F_pl_par, F_pl_par_score) && F_pl_par_score.isBetter(F_calib_score)
+                    && getNonPlanarSupport(F_pl_par) > getNonPlanarSupport(F_calib)) {
+                swapF(F_pl_par, F_pl_par_score);
+                return true;
+            }
             swapF(F_calib, F_calib_score);
             return true;
+        } else {
+            if (planeAndParallaxRANSAC(H_best, h_outliers, num_h_outliers, max_iters_plane_and_parallax, true,
+                    F_best_score, non_planar_support_degen_F, F_pl_par, F_pl_par_score)) {
+                swapF(F_pl_par, F_pl_par_score);
+                return true;
+            }
         }
-
-        Score F_pl_par_score; Mat F_pl_par;
-        if (planeAndParallaxRANSAC(H_best, plane_parallax_H_sample, plane_parallax_H_sample_size, max_iters_plane_and_parallax, true, F_pl_par, F_pl_par_score) ||
-            planeAndParallaxRANSAC(H_best, h_outliers, num_h_outliers, max_iters_plane_and_parallax, true, F_pl_par, F_pl_par_score)) {
-            swapF(F_pl_par, F_pl_par_score);
-//#ifdef DEBUG_DEGENSAC
-//            std::cout << "Plane-&-parallax time " << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - parallax_time).count() << '\n';
-//            std::cout << "RETURN F FROM PL-&-PAR (" << F_best_score.score << ", " << F_best_score.inlier_number << ") -> (" << F_pl_par_score.score << ", " << F_pl_par_score.inlier_number << ")\n";
-//#endif
-            return true;
+        if (! isFDegenerate(non_planar_support_degen_F)) {
+            return false;
         }
-//#ifdef DEBUG_DEGENSAC
-//        std::cout << "Plane-&-parallax time " << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - parallax_time).count()
-//            << ", score (" << F_pl_par_score.score << ", " << F_pl_par_score.inlier_number << '\n';
-//#endif
         non_degenerate_model_score = Score();
-#ifdef DEBUG_DEGENSAC
-        std::cout << "FAILED TO RECOVER, best #inls " << F_best_score.inlier_number << " calib " << F_calib_score.inlier_number << " " << " " << F_pl_par_score.inlier_number << "\n";
-#endif
         return true;
     }
 
@@ -424,7 +467,7 @@ public:
         // sign of translation does not make difference
         const Mat F1 = Mat(true_K2_inv_t * Math::getSkewSymmetric(t[0]) * R[0] * true_K1_inv);
         const Mat F2 = Mat(true_K2_inv_t * Math::getSkewSymmetric(t[1]) * R[1] * true_K1_inv);
-        const auto score_f1 = quality->getScore(F1), score_f2 = quality->getScore(F2);
+        const auto score_f1 = quality->getScore(f_error->getErrors(F1)), score_f2 = quality->getScore(f_error->getErrors(F2));
         if (score_f1.isBetter(score_f2)) {
             F_from_K = F1; F_from_K_score = score_f1;
         } else {
@@ -433,13 +476,14 @@ public:
         return true;
     }
     bool planeAndParallaxRANSAC (const Matx33d &H, std::vector<int> &non_planar_pts, int num_non_planar_pts,
-            int max_iters_pl_par, bool use_preemptive, Mat &F_new, Score &F_new_score) {
+            int max_iters_pl_par, bool use_preemptive, const Score &score_degen_F, int non_planar_support_degen_F,
+            Mat &F_new, Score &F_new_score) {
         if (num_non_planar_pts < 2)
             return false;
         num_models_used_so_far = 0; // reset estimation of lambda for plane-and-parallax
         int max_iters = max_iters_pl_par, non_planar_support = 0, iters = 0;
         std::vector<Matx33d> F_good;
-        std::vector<std::pair<int,int>> pairs;
+        const double CLOSE_THR = 1.0;
         for (; iters < max_iters; iters++) {
             // draw two random points
             int h_outlier1 = 4 * non_planar_pts[rng.uniform(0, num_non_planar_pts)];
@@ -447,52 +491,50 @@ public:
             while (h_outlier1 == h_outlier2)
                 h_outlier2 = 4 * non_planar_pts[rng.uniform(0, num_non_planar_pts)];
 
+            const auto x1 = points[h_outlier1], y1 = points[h_outlier1+1], X1 = points[h_outlier1+2], Y1 = points[h_outlier1+3];
+            const auto x2 = points[h_outlier2], y2 = points[h_outlier2+1], X2 = points[h_outlier2+2], Y2 = points[h_outlier2+3];
+            if ((fabsf(X1 - X2) < CLOSE_THR && fabsf(Y1 - Y2) < CLOSE_THR) ||
+                (fabsf(x1 - x2) < CLOSE_THR && fabsf(y1 - y2) < CLOSE_THR))
+                continue;
+
             // do plane and parallax with outliers of H
-            // F = [(p1' x Hp1) x (p2' x Hp2)]_x H
-            const Matx33d F = Math::getSkewSymmetric(
-                    (Vec3d(points[h_outlier1+2], points[h_outlier1+3], 1).cross   // p1'
-               (H * Vec3d(points[h_outlier1  ], points[h_outlier1+1], 1))).cross // Hp1
-                     (Vec3d(points[h_outlier2+2], points[h_outlier2+3], 1).cross   // p2'
-               (H * Vec3d(points[h_outlier2  ], points[h_outlier2+1], 1)))       // Hp2
-            ) * H;
+            // F = [(p1' x Hp1) x (p2' x Hp2)]_x H = [e']_x H
+            Vec3d ep = (Vec3d(X1, Y1, 1).cross(H * Vec3d(x1, y1, 1)))  // l1 = p1' x Hp1
+                      .cross((Vec3d(X2, Y2, 1).cross(H * Vec3d(x2, y2, 1))));// l2 = p2' x Hp2
+            const Matx33d F = Math::getSkewSymmetric(ep) * H;
+            const auto * const f = F.val;
+            // check orientation constraint of epipolar lines
+            const bool valid = (f[0]*x1+f[1]*y1+f[2])*(ep[1]-ep[2]*Y1) * (f[0]*x2+f[1]*y2+f[2])*(ep[1]-ep[2]*Y2) > 0;
+            if (!valid) continue;
 
             const int num_f_inliers_of_h_outliers = getNonPlanarSupport(Mat(F), num_models_used_so_far >= MAX_MODELS_TO_TEST, non_planar_support);
-            // std::cout << "pl & par, non planar support " << num_f_inliers_of_h_outliers << " score " << quality->getScore(Mat(F)).score << "\n";
             if (non_planar_support < num_f_inliers_of_h_outliers) {
                 non_planar_support = num_f_inliers_of_h_outliers;
-                const double predicted_iters = log_conf / log(1 - std::pow
-                        (static_cast<double>(num_f_inliers_of_h_outliers) / num_h_outliers, 2));
+                const double predicted_iters = log_conf / log(1 - pow(static_cast<double>
+                    (getNonPlanarSupport(Mat(F), non_planar_pts, num_non_planar_pts)) / num_non_planar_pts, 2));
                 if (use_preemptive && ! std::isinf(predicted_iters) && predicted_iters < max_iters)
                     max_iters = static_cast<int>(predicted_iters);
                 F_good = { F };
-                pairs = {std::make_pair(h_outlier1, h_outlier2)};
             } else if (non_planar_support == num_f_inliers_of_h_outliers) {
                 F_good.emplace_back(F);
-                pairs.emplace_back(std::make_pair(h_outlier1, h_outlier2));
             }
         }
 
-        if (isFDegenerate(non_planar_support) || F_good.empty()) {
-            return false;
-        }
-
         F_new_score = Score();
-        int idx = 0, best_idx = 0;
         for (const auto &F_ : F_good) {
-            const auto sc = quality->getScore(Mat(F_));
+            const auto sc = quality->getScore(f_error->getErrors(Mat(F_)));
             if (sc.isBetter(F_new_score)) {
                 F_new_score = sc;
                 F_new = Mat(F_);
             }
-            idx++;
         }
-
-#ifdef DEBUG_DEGENSAC
-        std::cout << "plane-and-parallax " << H_out_score.score << " " << H_out_score.inlier_number << " out " << non_planar_support_out << " iters " << iters << "\n";
-#endif
+        if (F_new_score.isBetter(score_degen_F) && non_planar_support > non_planar_support_degen_F)
+            return true;
+        if (isFDegenerate(non_planar_support))
+            return false;
         return true;
     }
-    bool calibDegensac (const Matx33d &H, Mat &F_new, Score &F_new_score, const Mat &F_degen_best, const Score &F_degen_score) {
+    bool calibDegensac (const Matx33d &H, Mat &F_new, Score &F_new_score, int non_planar_support_degen_F, const Score &F_degen_score) {
         if (! is_principal_pt_set) {
             // estimate principal points from coordinates
             float px1 = 0, py1 = 0, px2 = 0, py2 = 0;
@@ -508,7 +550,7 @@ public:
         std::vector<Matx33d> R; std::vector<Vec3d> t; std::vector<Mat> F_good;
         std::vector<double> best_f;
         int non_planar_support_out = 0;
-        for (double f = 300; f <= 3500; f += 150.) {
+        for (double f = 300; f <= 3000; f += 150.) {
             K(0,0) = K(1,1) = K2(0,0) = K2(1,1) = f;
             const double one_over_f = 1/f;
             K_inv(0,0) = K_inv(1,1) = K2_inv(0,0) = K2_inv(1,1) = K2_inv_t(0,0) = K2_inv_t(1,1) = one_over_f;
@@ -519,8 +561,6 @@ public:
             Mat F2 = Mat(K2_inv_t * Math::getSkewSymmetric(t[1]) * R[1] * K_inv);
             int non_planar_f1 = getNonPlanarSupport(F1, true, non_planar_support_out),
                 non_planar_f2 = getNonPlanarSupport(F2, true, non_planar_support_out);
-//            std::cout << "f " << f << " non planar supports " << non_planar_f1 << " " << non_planar_f2 << " best " << non_planar_support_out <<
-//                      " inliers " << quality->getScore(F1).inlier_number << " "<< quality->getScore(F2).inlier_number << "\n";
             if (non_planar_f1 < non_planar_f2) {
                 non_planar_f1 = non_planar_f2; F1 = F2;
             }
@@ -535,7 +575,7 @@ public:
         }
         F_new_score = Score();
         for (int i = 0; i < (int) F_good.size(); i++) {
-            const auto sc = quality->getScore(F_good[i]);
+            const auto sc = quality->getScore(f_error->getErrors(F_good[i]));
             if (sc.isBetter(F_new_score)) {
                 F_new_score = sc;
                 F_good[i].copyTo(F_new);
@@ -545,9 +585,8 @@ public:
                 }
             }
         }
-        if (!F_new_score.isBetter(F_degen_score) && non_planar_support_out <= getNonPlanarSupport(F_degen_best)) {
+        if (F_degen_score.isBetter(F_new_score) && non_planar_support_out <= non_planar_support_degen_F)
             return false;
-        }
 
         /*
         // logarithmic search -> faster but less accurate
@@ -560,31 +599,21 @@ public:
             else f_min = f_half;
         }
         */
-
-#ifdef DEBUG_DEGENSAC
-    std::cout << "calib degensac " << F_new_score.score << " " << F_new_score.inlier_number << " out " << non_planar_support_out << "\n";
-#endif
         return true;
     }
-    void getOutliersH (const Mat &degen_F) {
+    void getOutliersH (const Mat &H_best) {
         // get H outliers
-        num_h_outliers = 0;
-        plane_parallax_H_sample_size = 0;
+        num_h_outliers_eval = num_h_outliers = 0;
         const auto &h_errors = h_reproj_error->getErrors(H_best);
         for (int pt = 0; pt < points_size; pt++)
-            if (h_errors[pt] > homography_threshold) {
+            if (h_errors[pt] > H_SAMPLE_THR_SQR) {
                 h_outliers[num_h_outliers++] = pt;
-                if (h_errors[pt] < MAX_H_THR)
-                    plane_parallax_H_sample[plane_parallax_H_sample_size++] = pt;
+                if (h_errors[pt] > MAX_H_THR)
+                    h_outliers_eval[num_h_outliers_eval++] = pt;
             }
-#ifdef DEBUG_DEGENSAC
-        std::cout << "H SCORE (" << H_best_score.score << ", " << H_best_score.inlier_number << " H outliers " << num_h_outliers << " / " << points_size << ")\n";
-#endif
     }
 
     bool verifyFundamental (const Mat &F_best, const Score &F_score, const std::vector<bool> &inliers_mask, Mat &F_new, Score &new_score) override {
-        if (true_K_given && areSameSingularValues(F_best))
-            return false;
         const int f_sample_size = 3, max_H_iters = 5; // 3.52 = log(0.01) / log(1 - std::pow(0.9, 3));
         int num_f_inliers = 0;
         std::vector<int> inliers(points_size), f_sample(f_sample_size);
@@ -593,7 +622,7 @@ public:
         // find e', null space of F^T
         const Vec3d e_prime = Utils::getLeftEpipole(F_best);
         const Matx33d A = Math::getSkewSymmetric(e_prime) * Matx33d(F_best);
-        H_best_score = Score(); H_best = Mat();
+        Score H_best_score; Mat H_best;
         for (int iter = 0; iter < max_H_iters; iter++) {
             sampler->generateSample(f_sample);
             Matx33d H;
@@ -605,12 +634,10 @@ public:
             }
         }
         if (H_best.empty()) return false; // non-degenerate
-        getOutliersH(F_best);
-        const bool is_F_degen = true_K_given ? true : isFDegenerate(getNonPlanarSupport(F_best));
-
-#ifdef DEBUG_DEGENSAC
-        std::cout << "F final verification: num h outliers " << num_h_outliers << " F non planar support " << F_support << " pts size " << points_size << "\n";
-#endif
+        optimizeH(H_best, H_best_score);
+        getOutliersH(H_best);
+        const int non_planar_support_best_F = getNonPlanarSupport(F_best);
+        const bool is_F_degen = true_K_given ? ! areSameSingularValues(F_best) : isFDegenerate(non_planar_support_best_F);
         Mat F_from_K; Score F_from_K_score;
         bool success = false;
         // generate non-degenerate F even though so-far-the-best one may not be degenerate
@@ -623,27 +650,22 @@ public:
             }
         } else {
             // use calibrated DEGENSAC
-            if (calibDegensac(H_best, F_from_K, F_from_K_score, F_best, F_score)) {
+            if (calibDegensac(H_best, F_from_K, F_from_K_score, non_planar_support_best_F, F_score)) {
                 new_score = F_from_K_score;
                 F_from_K.copyTo(F_new);
                 success = true;
             }
         }
-        
+
         if (!is_F_degen) {
-#ifdef DEBUG_DEGENSAC
-        std::cout << "final F is not degenerate\n";
-#endif
             return false;
         } else if (success) // F is degenerate
             return true; // but successfully recovered
-        
+
         // recover degenerate F using plane-and-parallax
         Score plane_parallax_score; Mat F_plane_parallax;
-#ifdef DEBUG_DEGENSAC
-        std::cout << "verify F: plane-&-parallax score " << plane_parallax_score.score << " " << plane_parallax_score.inlier_number << '\n';
-#endif
-        if (planeAndParallaxRANSAC(H_best, h_outliers, num_h_outliers, 20, true, F_plane_parallax, plane_parallax_score)) {
+        if (planeAndParallaxRANSAC(H_best, h_outliers, num_h_outliers, 20, true,
+                F_score, non_planar_support_best_F, F_plane_parallax, plane_parallax_score)) {
             new_score = plane_parallax_score;
             F_plane_parallax.copyTo(F_new);
             return true;
@@ -677,10 +699,9 @@ private:
         const auto EtE = E.t() * E;
         const auto e11 = EtE(0,0), e12 = EtE(0,1), e13 = EtE(0,2), e22 = EtE(1,1), e23 = EtE(1,2), e33 = EtE(2,2);
         double // c1 = -e33*e12*e12 + 2*e12*e13*e23 - e22*e13*e13 - e11*e23*e23 + e11*e22*e33 == 0 because F has 0 third singular value
-        c2 = e12*e12 + e13*e13 + e23*e23 - e11*e22 - e11*e33 - e22*e33, c3 = e11 + e22 + e33;// c4 = -1;
+        c2 = e12*e12 + e13*e13 + e23*e23 - e11*e22 - e11*e33 - e22*e33, c3 = e11 + e22 + e33;// c3 > 0 = trace of EE^T = sum of positive eigen values, c4 = -1;
         double d = c3 * c3 + 4 * c2; d = d < 0 ? 0 : sqrt(d); // numerical problem, eigen values can't be complex for positive definie E^T E matrix
         // check eigen ratio. eig value is squared singular value. Use 5% threshold: 1.05^2 = 1.1025
-        // Vec3d w; SVD::compute(E, w); std::cout << "SVD: " << w / w[1] << " eig " << sqrt((-c3 - d) / (-c3 + d)) << "\n"; // debug
         return (-c3 - d) / (-c3 + d) < 1.1025;
     }
     bool getH (const Matx33d &A, const Vec3d &e_prime, int smpl1, int smpl2, int smpl3, Matx33d &H) {
@@ -698,28 +719,33 @@ private:
         H = A - e_prime * (M.inv() * b).t();
         return true;
     }
+    int getNonPlanarSupport (const Mat &F, const std::vector<int> &pts, int num_pts) {
+        int non_rand_support = 0;
+        f_error->setModelParameters(F);
+        for (int pt = 0; pt < num_pts; pt++)
+            if (f_error->getError(pts[pt]) < f_threshold_sqr)
+                non_rand_support++;
+        return non_rand_support;
+    }
     int getNonPlanarSupport (const Mat &F, bool preemptive=false, int max_so_far=0) {
         int non_rand_support = 0;
         f_error->setModelParameters(F);
         if (preemptive) {
-            const auto preemptive_thr = -num_h_outliers + max_so_far;
-            for (int pt = 0; pt < num_h_outliers; pt++)
-                if (f_error->getError(h_outliers[pt]) < f_threshold_sqr)
+            const auto preemptive_thr = -num_h_outliers_eval + max_so_far;
+            for (int pt = 0; pt < num_h_outliers_eval; pt++)
+                if (f_error->getError(h_outliers_eval[pt]) < f_threshold_sqr)
                     non_rand_support++;
                 else if (non_rand_support - pt < preemptive_thr)
                         break;
         } else {
-            for (int pt = 0; pt < num_h_outliers; pt++)
-                if (f_error->getError(h_outliers[pt]) < f_threshold_sqr)
+            for (int pt = 0; pt < num_h_outliers_eval; pt++)
+                if (f_error->getError(h_outliers_eval[pt]) < f_threshold_sqr)
                     non_rand_support++;
             if (num_models_used_so_far < MAX_MODELS_TO_TEST && !true_K_given/*for K we know that recovered F cannot be degenerate*/) {
                 non_planar_supports[num_models_used_so_far++] = non_rand_support;
                 if (num_models_used_so_far == MAX_MODELS_TO_TEST) {
-                    getLambda(non_planar_supports, 2.32, num_h_outliers, 0, false, estimated_min_non_planar_support);
+                    getLambda(non_planar_supports, 2.32, num_h_outliers_eval, 0, false, estimated_min_non_planar_support);
                     if (estimated_min_non_planar_support < 3) estimated_min_non_planar_support = 3;
-#ifdef DEBUG_DEGENSAC
-                    std::cout << "est support " << estimated_min_non_planar_support << "\n";
-#endif
                 }
             }
         }
@@ -734,8 +760,8 @@ private:
     bool isFDegenerate (int num_f_inliers_h_outliers) const {
         if (num_models_used_so_far < MAX_MODELS_TO_TEST)
             // the minimum number of non-planar support has not estimated yet -> use tentative
-            return num_f_inliers_h_outliers < std::min(TENT_MIN_NON_PLANAR_SUPP, (int)(0.5 * num_h_outliers));
-        return num_f_inliers_h_outliers < estimated_min_non_planar_support;   
+            return num_f_inliers_h_outliers < std::min(TENT_MIN_NON_PLANAR_SUPP, (int)(0.1 * num_h_outliers_eval));
+        return num_f_inliers_h_outliers < estimated_min_non_planar_support;
     }
 };
 Ptr<FundamentalDegeneracy> FundamentalDegeneracy::create (int state, const Ptr<Quality> &quality_,

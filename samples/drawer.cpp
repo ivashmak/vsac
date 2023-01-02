@@ -22,19 +22,27 @@ void Drawer::drawing_resize (cv::Mat &image, int new_img_size) {
         */
     cv::resize(image, image, cv::Size(sqrt ((double) image.cols * new_img_size / image.rows), sqrt ((double) image.rows * new_img_size / image.cols)));
 }
-
-void Drawer::drawHresiduals (const cv::Mat &H, const cv::Mat &points, cv::Mat &img2, const std::vector<int> &inliers, int inliers_size, int circle_size, int line_size, bool rand_colour) {
-    const auto * const pts = (float *) points.data;
+void Drawer::drawHresiduals (const cv::Mat &H_, const cv::Mat &points1_, const cv::Mat &points2_, const cv::Mat &img1_, const cv::Mat &img2_, cv::Mat &new_image,
+                             bool rand_colour, int circle_size, int line_size, const std::vector<bool> &inliers, int offset, cv::Scalar back) {
+    CV_CheckEQ(points1_.isContinuous() && points2_.isContinuous(), true, "Points must be continuous!");
+    cv::Mat points1 = points1_, points2 = points2_, img1 = img1_.clone(), img2 = img2_.clone();
+    points1.convertTo(points1, CV_32F);
+    points2.convertTo(points2, CV_32F);
+    const auto * const pts1 = (float *) points1.data, * const pts2 = (float *) points2.data;
     cv::Scalar color (0, 0, 255);
     cv::RNG rand_gen;
-    for (int i = 0; i < inliers_size; i++) {
+    cv::Matx33d H (H_), H_inv (cv::Mat(H_.inv()));
+    for (int i = 0; i < points1.rows; i++) {
+        if (!inliers[i]) continue;
         if (rand_colour) color = cv::Scalar(rand_gen.uniform(0, 256), rand_gen.uniform(0, 256), rand_gen.uniform(0, 256));
-        const int inl = inliers[i];
-        cv::Vec3d pt1 (pts[4*inl], pts[4*inl+1], 1), pt2(pts[4*inl+2], pts[4*inl+3], 1);
-        cv::Mat pt2_est = H * pt1;
-        pt2_est /= pt2_est.at<double>(2);
-        cv::line(img2, cv::Point2d(pt2[0], pt2[1]), cv::Point2d(pt2_est.at<double>(0), pt2_est.at<double>(1)), color, line_size);
+        const int inl = 2*i;
+        cv::Vec3d pt1 (pts1[inl], pts1[inl+1], 1), pt2(pts2[inl], pts2[inl+1], 1);
+        cv::Vec3d pt2_est = H * pt1, pt1_est = H_inv * pt2;
+        pt2_est /= pt2_est[2]; pt1_est /= pt1_est[2];
+        cv::line(img1, cv::Point2d(pt1[0], pt1[1]), cv::Point2d(pt1_est[0], pt1_est[1]), color, line_size);
+        cv::line(img2, cv::Point2d(pt2[0], pt2[1]), cv::Point2d(pt2_est[0], pt2_est[1]), color, line_size);
     }
+    concatenateImage(true, img1, img2, new_image, offset, back);
 }
 
 /*
@@ -43,7 +51,7 @@ void Drawer::drawHresiduals (const cv::Mat &H, const cv::Mat &points, cv::Mat &i
     */
 void Drawer::showMatches (const cv::Mat &img1, const cv::Mat &img2, cv::Mat &img12, const std::vector<bool> &mask,
         const cv::Mat &points1_, const cv::Mat &points2_, bool hor, int thickness, bool random_colors, bool show_all_points, int inlier_sz, int offset, cv::Scalar back) {
-    CV_CheckEQ(points1_.isContinuous() && points1_.isContinuous(), true, "Points must be continuous!");
+    CV_CheckEQ(points1_.isContinuous() && points2_.isContinuous(), true, "Points must be continuous!");
     cv::Mat points1 = points1_, points2 = points2_;
     points1.convertTo(points1, CV_32F);
     points2.convertTo(points2, CV_32F);
@@ -104,7 +112,7 @@ void Drawer::drawCorrectedPointsF (cv::Mat &img1, cv::Mat &img2, const cv::Mat &
 
 
 void Drawer::drawEpipolarLines (const cv::Mat &F, const cv::Mat &pts1_, const cv::Mat &pts2_, const cv::Mat &img1_, const cv::Mat &img2_,
-        cv::Mat &new_image, bool random_colors, int line_sz, int circle_sz, const std::vector<bool> &inliers, int offset, cv::Scalar back){
+        cv::Mat &new_image, bool random_colors, int line_sz, int circle_sz, const std::vector<bool> &inliers, int offset, cv::Scalar back, bool draw_epipoles){
     cv::Mat pts1, pts2;
     pts1_.convertTo(pts1, CV_64F);
     pts2_.convertTo(pts2, CV_64F);
@@ -140,24 +148,32 @@ void Drawer::drawEpipolarLines (const cv::Mat &F, const cv::Mat &pts1_, const cv
 //        circle(image1, cv::Point2d(pts1_.row(pt)), circle_sz, col, -1);
 //        circle(image2, cv::Point2d(pts2_.row(pt)), circle_sz, col, -1);
     }
+    if (draw_epipoles) {
+        cv::Mat U, D, Vt;
+        cv::SVDecomp(F, D, U, Vt);
+        cv::Vec3d ep1 = Vt.row(2), ep2 = U.col(2);
+        const bool ep1_at_inf = fabs(ep1[2]) < DBL_EPSILON, ep2_at_inf = fabs(ep2[2]) < DBL_EPSILON;
+        if (!ep1_at_inf) circle(image1, cv::Point2d(ep1[0] / ep1[2], ep1[1] / ep1[2]), 2*circle_sz, cv::Scalar(0,0,0), -1);
+        if (!ep2_at_inf) circle(image2, cv::Point2d(ep2[0] / ep2[2], ep2[1] / ep2[2]), 2*circle_sz, cv::Scalar(0,0,0), -1);
+    }
     concatenateImage(true, image1, image2, new_image, offset, back);
 }
 
 void Drawer::concatenateImage (bool per_row, const cv::Mat &img1, const cv::Mat &img2, cv::Mat &concatenated_img, int offset, cv::Scalar background) {
     auto concatenateRow = [&] (const cv::Mat &i1, const cv::Mat &i2) {
-        cv::Mat offset_img(i1.rows, offset, img1.type(), background);
         if (offset == 0) {
             cv::hconcat(i1, i2, concatenated_img);
         } else {
+            cv::Mat offset_img(i1.rows, offset, img1.type(), background);
             cv::hconcat(i1, offset_img, concatenated_img);
             cv::hconcat(concatenated_img, i2, concatenated_img);
         }
     };
     auto concatenateCol = [&] (const cv::Mat &i1, const cv::Mat &i2) {
-        cv::Mat offset_img(offset, i1.cols, img1.type(), background);
         if (offset == 0) {
             cv::vconcat(i1, i2, concatenated_img);
         } else {
+            cv::Mat offset_img(offset, i1.cols, img1.type(), background);
             cv::vconcat(i1, offset_img, concatenated_img);
             cv::vconcat(concatenated_img, i2, concatenated_img);
         }
@@ -195,5 +211,25 @@ void Drawer::concatenateImage (bool per_row, const cv::Mat &img1, const cv::Mat 
                 concatenateCol(img1, img2_);
             }
         }
+    }
+}
+
+void Drawer::drawConvexHull (const cv::Mat &image, cv::Mat &image_new, const cv::Mat &points, std::vector<bool> &mask, int circle_size, int line_sz) {
+    cv::Mat good_pts; good_pts.reserve(points.rows);
+    for (int i = 0; i < points.rows; i++)
+        if (mask[i]) good_pts.push_back(points.row(i));
+    std::vector<int> hull_idxs;
+    cv::convexHull(good_pts, hull_idxs, true);
+    const auto * const pts = (float *) good_pts.data;
+    image_new = image.clone();
+    const int pts_size = (int)(circle_size/2)+1;
+    cv::Scalar pt_color(255,0,0), hull_color(0,255,0);
+    for (int idx = 0; idx < good_pts.rows; idx++)
+        cv::circle(image_new, cv::Point2d(pts[2*idx], pts[2*idx+1]), pts_size, pt_color, -1);
+    for (int i = 0; i < (int)hull_idxs.size(); i++) {
+        const int idx1 = 2*hull_idxs[i], idx2 = 2*hull_idxs[(i+1)%hull_idxs.size()];
+        cv::Point2d pt1(pts[idx1], pts[idx1+1]);
+        cv::circle(image_new, cv::Point2d(pts[idx1], pts[idx1+1]), circle_size, hull_color, -1);
+        line(image_new, cv::Point2d(pts[idx1], pts[idx1+1]), cv::Point2d(pts[idx2], pts[idx2+1]), hull_color, line_sz);
     }
 }

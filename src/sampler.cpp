@@ -60,7 +60,6 @@ private:
     int pool_idx, sample_size, points_size = 0, num_inliers = 0;
     RNG rng;
     bool do_quasi;
-    // test
 public:
 
     QuasiUniformSamplerImpl (int state, int sample_size_, int points_size_)
@@ -81,6 +80,9 @@ public:
         }
         pool_idx = 0;
         num_inliers = idx1;
+        shufflePoints();
+    }
+    void shufflePoints () {
         for (int i = num_inliers; i >= 1; i--)
             std::swap(points_random_pool[rng.uniform(0, i)], points_random_pool[i-1]);
         for (int i = points_size; i >= num_inliers+1; i--)
@@ -91,11 +93,11 @@ public:
     }
     void generateSample (std::vector<int> &sample) override {
         if (do_quasi) {
-            // std::cout << "do quasi sampling " << pool_idx << " / " << num_inliers << "\n";
             for (int i = 0; i < sample_size; i++)
                 sample[i] = points_random_pool[pool_idx++];
-            if (pool_idx + sample_size > points_size)
-                do_quasi = false;
+            if (pool_idx + sample_size > points_size) {
+                shufflePoints(); pool_idx = 0;
+            }
         } else {
             int random_pool_size = points_size; // random points of entire range
             for (int i = 0; i < sample_size; i++) {
@@ -107,7 +109,7 @@ public:
                 // swap random point with the end of random pool
                 std::swap(points_random_pool[array_random_index],
                           points_random_pool[--random_pool_size]);
-            }            
+            }
         }
     }
 private:
@@ -315,7 +317,7 @@ public:
 
         // other initializations
         termination_length = points_size; // n* = N, largest set sampled in PROSAC (termination length)
-        subset_size = sample_size;		// n,  size of the current sampling pool
+        subset_size = sample_size;      // n,  size of the current sampling pool
         kth_sample_number = 0; // t (iteration)
     }
 
@@ -330,15 +332,19 @@ public:
 
         // Choice of the hypothesis generation set
         // if (t = T'_n) & (n < n*) then n = n + 1 (eqn. 4)
-        if (kth_sample_number == growth_function[subset_size-1] && subset_size < termination_length)
+        if (kth_sample_number >= growth_function[subset_size-1] && subset_size < termination_length)
             subset_size++;
 
         // Semi-random sample M_t of size m
         // if T'n < t   then
         if (growth_function[subset_size-1] < kth_sample_number) {
-            // The sample contains m-1 points selected from U_(n-1) at random and u_n
-            random_gen->generateUniqueRandomSet(sample, sample_size-1, subset_size-1);
-            sample[sample_size-1] = subset_size-1;
+            if (subset_size >= termination_length) {
+                random_gen->generateUniqueRandomSet(sample, sample_size, subset_size);
+            } else {
+                // The sample contains m-1 points selected from U_(n-1) at random and u_n
+                random_gen->generateUniqueRandomSet(sample, sample_size-1, subset_size-1);
+                sample[sample_size-1] = subset_size-1;
+            }
         } else {
             // Select m points from U_n at random.
             random_gen->generateUniqueRandomSet(sample, sample_size, subset_size);

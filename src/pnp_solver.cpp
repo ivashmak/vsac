@@ -60,7 +60,6 @@ public:
     */
 
     int estimate (const std::vector<int> &sample, std::vector<Mat> &models) const override {
-        // std::cout << "start estimation\n";
         std::vector<double> A1 (60, 0), A2(56, 0); // 5x12, 7x8
 
         // std::vector<double> A_all(11*12, 0);
@@ -230,7 +229,6 @@ public:
         // extract the last null-vector
         Eigen::Map<Eigen::Matrix<double, 12, 1>>((double *)models[0].data) = Q.col(11);
 #else
-        std::cout << "non-minimal SVD, reshape\n";
         Matx<double, 12, 12> Vt;
         Vec<double, 12> D;
         if (! eigen(Matx<double, 12, 12>(AtA), D, Vt)) return 0;

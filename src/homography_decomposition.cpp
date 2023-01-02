@@ -20,9 +20,8 @@ void findRmatFrom_tstar_n(const Matx33d &Hnorm, const cv::Vec3d& tstar, const cv
     if (determinant(R) < 0)
         R *= -1;
 }
-void Utils::getClosePoints (const cv::Mat &points, std::vector<std::vector<int>> &close_points, double close_thr_sqr) {
-    const auto close_thr = sqrtf((float)close_thr_sqr);
-    const auto graph = cv::vsac::GridNeighborhoodGraph2::create(points, points.rows, close_thr, close_thr, close_thr, close_thr);
+void Utils::getClosePoints (const cv::Mat &points, std::vector<std::vector<int>> &close_points, float close_thr) {
+    const auto graph = cv::vsac::GridNeighborhoodGraph2Images::create(points, points.rows, close_thr, close_thr, close_thr, close_thr);
     close_points = graph->getGraph();
 }
 /*

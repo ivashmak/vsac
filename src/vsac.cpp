@@ -11,7 +11,7 @@ bool VSAC::run(::vsac::Output &vsac_output) {
     const bool LO = params.getLO() != ::vsac::LocalOptimMethod::LOCAL_OPTIM_NULL, IS_QUASI_SAMPLING = params.isQuasiSampling(),
         IS_FUNDAMENTAL = params.isFundamental(), IS_NON_RAND_TEST = params.isNonRandomnessTest();
     const int MAX_MODELS_ADAPT = 21, MAX_ITERS_ADAPT = MAX_MODELS_ADAPT/*assume at least 1 model from 1 sample*/,
-        sample_size = params.getSampleSize(), MAX_ITERS_BEFORE_LO = params.getMaxItersBeforeLO();
+        sample_size = params.getSampleSize();
     const double IOU_SIMILARITY_THR = 0.80;
     std::vector<int> non_degen_sample, best_sample;
 
@@ -34,10 +34,10 @@ bool VSAC::run(::vsac::Output &vsac_output) {
     if (! parallel) {
         // adaptive sprt test
         double IoU = 0, mean_time_estimation = 0, mean_num_est_models = 0, mean_time_evaluation = 0;
-        bool adapt = IS_NON_RAND_TEST || params.getVerifier() == ::vsac::VerificationMethod ::ASPRT, was_LO_run = false;
-        int min_non_random_inliers = 0, iters = 0, max_iters = params.getMaxIters(), num_estimations = 0;
+        bool adapt = IS_NON_RAND_TEST || params.getVerifier() == ::vsac::VerificationMethod ::ASPRT || IS_QUASI_SAMPLING, was_LO_run = false;
+        int min_non_random_inliers = 30, iters = 0, num_estimations = 0, max_iters = params.getMaxIters();
         Mat non_degenerate_model, lo_model;
-        Score current_score, lo_score, non_degenerate_model_score;
+        Score current_score, non_degenerate_model_score, best_score_sample;
         std::vector<bool> model_inliers_mask (points_size);
         std::vector<Mat> models(_estimator->getMaxNumSolutions());
         std::vector<int> sample(_estimator->getMinimalSampleSize()), supports;
@@ -47,59 +47,50 @@ bool VSAC::run(::vsac::Output &vsac_output) {
             const auto sftb_begin_time = std::chrono::steady_clock::now();
 #endif
             _quality->getInliers(new_model, model_inliers_mask);
-            if (!adapt && IS_QUASI_SAMPLING && new_score.inlier_number > 100)// update quasi sampler
-                _sampler->updateSampler(model_inliers_mask);
-            // IoU is used for LO and adaption
             IoU = Utils::intersectionOverUnion(best_inliers_mask, model_inliers_mask);
-#ifdef DEBUG
-             std::cout << "UPDATE BEST, iters " << iters << " (" << best_score.score << "," << best_score.inlier_number << ") -> (" << new_score.score << ", " << new_score.inlier_number << ") IoU " << IoU << " from LO " << from_lo << '\n';
-#endif
-            if (!best_model.empty() && models_for_random_test.size() < MAX_TEST_MODELS_NONRAND && IoU < IOU_SIMILARITY_THR) { // use IoU to not save similar models
+            best_inliers_mask = model_inliers_mask;
+
+            if (!best_model.empty() && (int)models_for_random_test.size() < MAX_TEST_MODELS_NONRAND && IoU < IOU_SIMILARITY_THR && !from_lo) { // use IoU to not save similar models
                 // save old best model for non-randomness test if necessary
                 models_for_random_test.emplace_back(best_model.clone());
                 samples_for_random_test.emplace_back(best_sample);
             }
-            if (!adapt) { // update quality and verifier to save evaluation time of a model
-                _quality->setBestScore(new_score.score);
-                _model_verifier->update(new_score.inlier_number);
-            }
+
             // update score, model, inliers and max iterations
-            best_inliers_mask = model_inliers_mask;
             best_score = new_score;
             new_model.copyTo(best_model);
-            best_sample = sample;
-            max_iters = _termination->update(best_model, best_score.inlier_number);
-            if (IS_FUNDAMENTAL) { // avoid degeneracy after LO run
-                last_model_from_LO = from_lo;
-                if (!last_model_from_LO) {
+
+            if (!from_lo) {
+                best_sample = sample;
+                if (IS_FUNDAMENTAL) { // avoid degeneracy after LO run
                     // save last model not from LO
                     best_model.copyTo(best_model_not_from_LO);
                     best_score_model_not_from_LO = best_score;
                 }
             }
+
+            _model_verifier->update(best_score, iters);
+            max_iters = _termination->update(best_model, best_score.inlier_number);
+            if (!adapt) // update quality and verifier to save evaluation time of a model
+                _quality->setBestScore(best_score.score);
+            last_model_from_LO = from_lo;
+            if (!adapt && IS_QUASI_SAMPLING && new_score.inlier_number > min_non_random_inliers)
+                _sampler->updateSampler(best_inliers_mask); // update quasi sampler
 #ifdef DEBUG
             sftb_time += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - sftb_begin_time).count();
 #endif
         };
-        auto runLO = [&] (int current_ransac_iters) {
+        auto run_lo = [&] (const Mat &_model, const Score &_score, bool force_lo) {
 #ifdef DEBUG
             const auto temp_time = std::chrono::steady_clock::now();
 #endif
             was_LO_run = true;
-            _local_optimization->setCurrentRANSACiter(current_ransac_iters);
-            if (_local_optimization->refineModel
-                    (best_model, best_score, lo_model, lo_score) && lo_score.isBetter(best_score)){
-#ifdef DEBUG
-                lo_time += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - temp_time).count();
-                std::cout << "START LO at " << iters << " BEST (" << best_score.score << "," << best_score.inlier_number << "), LO is BETTER (" << lo_score.score << ", " << lo_score.inlier_number << ")\n";
-#endif
+            _local_optimization->setCurrentRANSACiter(force_lo ? iters : -1);
+            Score lo_score;
+            if (_local_optimization->refineModel(_model, _score, lo_model, lo_score) && lo_score.isBetter(best_score))
                 update_best(lo_model, lo_score, true);
-            }
 #ifdef DEBUG
-            else {
-                lo_time += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - temp_time).count();
-                 std::cout << "START LO at " << iters << " BEST (" << best_score.score << "," << best_score.inlier_number << "), LO is WORSE (" << lo_score.score << ", " << lo_score.inlier_number << ")\n";
-            }
+            lo_time += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - temp_time).count();
 #endif
         };
         for (; iters < max_iters; iters++) {
@@ -112,14 +103,13 @@ bool VSAC::run(::vsac::Output &vsac_output) {
 #endif
             int number_of_models;
             if (adapt) {
-                const auto time_estimation = std::chrono::steady_clock::now();
+                const auto time_estimation = clock();
                 number_of_models = _estimator->estimateModels(sample, models);
 #ifdef DEBUG
-                est_time += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - time_estimation).count();
+                est_time += double(clock() - time_estimation);
 #endif
                 if (iters != 0)
-                    mean_time_estimation += std::chrono::duration_cast<std::chrono::microseconds>
-                        (std::chrono::steady_clock::now() - time_estimation).count();
+                    mean_time_estimation += double(clock() - time_estimation);
                 mean_num_est_models += number_of_models;
                 num_estimations++;
             } else {
@@ -134,28 +124,25 @@ bool VSAC::run(::vsac::Output &vsac_output) {
             for (int i = 0; i < number_of_models; i++) {
                 num_total_tested_models++;
                 if (adapt) {
-                    const auto time_evaluation = std::chrono::steady_clock::now();
+                    const auto time_evaluation = clock();
                     current_score = _quality->getScore(models[i]);
                     if (iters != 0)
-                        mean_time_evaluation += std::chrono::duration_cast<std::chrono::microseconds>
-                            (std::chrono::steady_clock::now() - time_evaluation).count();
+                        mean_time_evaluation += double(clock() - time_evaluation);
 #ifdef DEBUG
-                    eval_time += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - time_evaluation).count();
+                    eval_time += double(clock() - time_evaluation);
 #endif
                     supports.emplace_back(current_score.inlier_number);
+                    if (IS_NON_RAND_TEST && best_score_sample.isBetter(current_score)) {
+                        models_for_random_test.emplace_back(models[i].clone());
+                        samples_for_random_test.emplace_back(sample);
+                    }
                 } else {
 #ifdef DEBUG
                     const auto temp_time = std::chrono::steady_clock::now();
 #endif
-                    if (_model_verifier->isModelGood(models[i])) {
-                        if (!_model_verifier->getScore(current_score))
-                            current_score = _quality->getScore(models[i]);
-                    } else {
+                    if (! _model_verifier->isModelGood(models[i], current_score)) {
 #ifdef DEBUG
-                        eval_time += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - temp_time).count();
-                        const auto sc = _quality->getScore(models[i]);
-                        if (sc.isBetter(best_score))
-                            std::cout << "SPRT REJECTED BETTER MODEL (" << sc.score << ", " << sc.inlier_number << ")\n";
+                       eval_time += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - temp_time).count();
 #endif
                         continue;
                     }
@@ -163,57 +150,47 @@ bool VSAC::run(::vsac::Output &vsac_output) {
                     eval_time += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - temp_time).count();
 #endif
                 }
-#ifdef DEBUG
-                std::cout << "iter " << iters << " score (" << current_score.score << ", " << current_score.inlier_number << ")\n";
-#endif
-                if (current_score.isBetter(best_score)) {
+                if (current_score.isBetter(best_score_sample)) {
 #ifdef DEBUG
                     const auto temp_time = std::chrono::steady_clock::now();
                     const bool is_degen = _degeneracy->recoverIfDegenerate(sample, models[i], current_score, non_degenerate_model, non_degenerate_model_score);
                     degensac_time += std::chrono::duration_cast<std::chrono::microseconds> (std::chrono::steady_clock::now() - temp_time).count();
-                    num_degensac_runs++;
                     if (is_degen) {
-                        num_degenerate_cases++;
 #else
                     if (_degeneracy->recoverIfDegenerate(sample, models[i], current_score,
                                non_degenerate_model, non_degenerate_model_score)) {
 #endif
-#ifdef DEBUG
-                        std::cout << "IS DEGENERATE, new score (" << non_degenerate_model_score.score << ", " << non_degenerate_model_score.inlier_number << ")\n";
-#endif
                         // check if best non degenerate model is better than so far the best model
-                        if (non_degenerate_model_score.isBetter(best_score))
+                        if (non_degenerate_model_score.isBetter(best_score)) {
                             update_best(non_degenerate_model, non_degenerate_model_score);
-                        else continue;
-                    } else update_best(models[i], current_score);
-                    if (!adapt && iters < max_iters && LO && best_score.inlier_number > min_non_random_inliers && IoU < IOU_SIMILARITY_THR && iters > MAX_ITERS_BEFORE_LO)
-                        runLO(iters); // update model by Local optimization
+                            best_score_sample = current_score.isBetter(best_score) ? best_score : current_score;
+                        } else continue;
+                    } else {
+                        best_score_sample = current_score;
+                        update_best(models[i], current_score);
+                    }
+                    if (LO && ((iters < max_iters && best_score.inlier_number > min_non_random_inliers && IoU < IOU_SIMILARITY_THR)))
+                        run_lo(best_model, best_score, false);
                 } // end of if so far the best score
-                else if (models_for_random_test.size() < MAX_TEST_MODELS_NONRAND) {
-                    models_for_random_test.emplace_back(models[i].clone());
-                    samples_for_random_test.emplace_back(sample);
-                }
-                if (iters > max_iters)
-                    break; // break loop over models
             } // end loop of number of models
             if (adapt && iters >= MAX_ITERS_ADAPT && num_total_tested_models >= MAX_MODELS_ADAPT) {
                 adapt = false;
                 lambda_non_random_all_inliers = getLambda(supports, 2.32, points_size, sample_size, false, min_non_random_inliers);
-#ifdef DEBUG
-                std::cout << "ADAPT ENDED, iters " << iters << " models " << num_total_tested_models << " min non-rand inls " << min_non_random_inliers << ", delta " << delta << " mu (lambda) " << delta * points_size << "\n";
-#endif
-                _model_verifier->updateSPRT(mean_time_estimation/(num_estimations-1), mean_time_evaluation/((num_total_tested_models-1) * points_size),
-                mean_num_est_models/num_estimations, lambda_non_random_all_inliers/points_size,(double)std::max(min_non_random_inliers, best_score.inlier_number)/points_size, best_score);
+                if (mean_time_estimation < 1e-7 || mean_time_evaluation < 1e-7) {
+                    mean_time_estimation = params.getTimeForModelEstimation();
+                    mean_time_evaluation = 1.0;
+                } else {
+                    mean_time_estimation /= (num_estimations-1);
+                    mean_time_evaluation /= ((num_total_tested_models-1) * points_size);
+                }
+                _model_verifier->updateSPRT(mean_time_estimation, mean_time_evaluation, mean_num_est_models/num_estimations, lambda_non_random_all_inliers/points_size,(double)std::max(min_non_random_inliers, best_score.inlier_number)/points_size, best_score);
             }
-            if (!adapt && LO && iters < max_iters && !best_model.empty() && !was_LO_run &&
-                    best_score.inlier_number > min_non_random_inliers && iters > MAX_ITERS_BEFORE_LO)
-                runLO(iters);
         } // end main while loop
         final_iters = iters;
         if (! was_LO_run && !best_model.empty() && LO)
-            runLO(-1 /*use full iterations of LO*/);
+            run_lo(best_model, best_score, true);
     } else { // parallel VSAC
-        const int MAX_THREADS = getNumThreads(), growth_max_samples = 200000;
+        const int MAX_THREADS = getNumThreads(), growth_max_samples = params.prosac_max_samples;
         const bool is_prosac = params.getSampler() == ::vsac::SamplingMethod::SAMPLING_PROSAC;
         std::atomic_bool success(false);
         std::atomic_int num_hypothesis_tested(0), thread_cnt(0), max_number_inliers(0), subset_size, termination_length;
@@ -261,9 +238,9 @@ bool VSAC::run(::vsac::Output &vsac_output) {
             Ptr<LocalOptimization> local_optimization;
             Ptr<MinimalSolver> min_solver;
             Ptr<NonMinimalSolver> non_min_solver;
-            Ptr<GammaValues> gamma_generator;
-            initialize (thread_state, min_solver, non_min_solver, gamma_generator, error, estimator, degeneracy, quality,
-                    model_verifier, local_optimization, termination, sampler, lo_sampler, true);
+            Ptr<WeightFunction> weight_fnc;
+            initialize (thread_state, min_solver, non_min_solver, error, estimator, degeneracy, quality,
+                    model_verifier, local_optimization, termination, sampler, lo_sampler, weight_fnc, true);
             bool is_last_from_LO_thread = false;
             Mat best_model_thread, non_degenerate_model, lo_model, best_not_LO_thread;
             Score best_score_thread, current_score, non_denegenerate_model_score, lo_score,best_score_all_threads, best_not_LO_score_thread;
@@ -287,7 +264,7 @@ bool VSAC::run(::vsac::Output &vsac_output) {
                 }
                 if (!adapt) { // update quality and verifier
                     quality->setBestScore(best_score_all);
-                    model_verifier->update(max_number_inliers);
+                    model_verifier->update(best_score_all_threads, iters);
                 }
                 // copy new score to best score
                 best_score_thread = new_score;
@@ -317,7 +294,7 @@ bool VSAC::run(::vsac::Output &vsac_output) {
             auto runLO = [&] (int current_ransac_iters) {
                 was_LO_run = true;
                 local_optimization->setCurrentRANSACiter(current_ransac_iters);
-                if (local_optimization->refineModel(best_model_thread, best_score_thread, lo_model, 
+                if (local_optimization->refineModel(best_model_thread, best_score_thread, lo_model,
                         lo_score) && lo_score.isBetter(best_score_thread))
                     update_best(lo_score, lo_model, true);
             };
@@ -326,7 +303,7 @@ bool VSAC::run(::vsac::Output &vsac_output) {
                 if (iters % 10 && !adapt) {
                     // Synchronize threads. just to speed verification of model.
                     quality->setBestScore(std::min(best_score_thread.score, (double)best_score_all));
-                    model_verifier->update(std::max(best_score.inlier_number, (int)max_number_inliers));
+                    model_verifier->update(best_score_thread.inlier_number > max_number_inliers ? best_score_thread : best_score_all_threads, iters);
                 }
 
                 if (is_prosac) {
@@ -357,10 +334,8 @@ bool VSAC::run(::vsac::Output &vsac_output) {
                     if (adapt) {
                         current_score = quality->getScore(models[i]);
                         supports.emplace_back(current_score.inlier_number);
-                    } else if (model_verifier->isModelGood(models[i])) {
-                        if (!model_verifier->getScore(current_score))
-                            current_score = quality->getScore(models[i]);
-                    } else continue;
+                    } else if (! model_verifier->isModelGood(models[i], current_score))
+                        continue;
 
                     if (current_score.isBetter(best_score_all_threads)) {
                         if (degeneracy->recoverIfDegenerate(sample, models[i], current_score,
@@ -371,7 +346,7 @@ bool VSAC::run(::vsac::Output &vsac_output) {
                             else continue;
                         } else update_best(current_score, models[i]);
                         if (!adapt && LO && num_hypothesis_tested < max_iters && IoU < IOU_SIMILARITY_THR &&
-                                best_score_thread.inlier_number > min_non_random_inliers && num_hypothesis_tested > MAX_ITERS_BEFORE_LO)
+                                best_score_thread.inlier_number > min_non_random_inliers)
                             runLO(iters);
                     } // end of if so far the best score
                     else if (tested_models_thread.size() < MAX_TEST_MODELS_NONRAND) {
@@ -388,8 +363,8 @@ bool VSAC::run(::vsac::Output &vsac_output) {
                     model_verifier->updateSPRT(params.getTimeForModelEstimation(), 1, (double)mean_num_est_models/num_estimations, lambda_non_random_all_inliers_thread/points_size,
                          (double)std::max(min_non_random_inliers, best_score.inlier_number)/points_size, best_score_all_threads);
                 }
-                if (!adapt && LO && num_hypothesis_tested < max_iters && !was_LO_run && !best_model_thread.empty() &&
-                        best_score_thread.inlier_number > min_non_random_inliers && num_hypothesis_tested > MAX_ITERS_BEFORE_LO)
+                if (LO && num_hypothesis_tested < max_iters && !was_LO_run && !best_model_thread.empty() &&
+                        best_score_thread.inlier_number > min_non_random_inliers)
                     runLO(iters);
             } // end of loop over iters
             if (! was_LO_run && !best_model_thread.empty() && LO)
@@ -454,40 +429,36 @@ bool VSAC::run(::vsac::Output &vsac_output) {
 #ifdef DEBUG
         std::cout << "BEST MODEL IS EMPTY!\n";
 #endif
-                vsac_output = ::vsac::Output(best_model, std::vector<bool>(), best_score.inlier_number, final_iters, ::vsac::MODEL_CONFIDENCE::RANDOM, std::vector<float>());
+        vsac_output = ::vsac::Output(best_model, std::vector<bool>(), best_score.inlier_number, final_iters, ::vsac::MODEL_CONFIDENCE::RANDOM, std::vector<float>());
         return false;
     }
 #ifdef DEBUG
-//    std::cout << "IS LAST MODEL FROM LO " << last_model_from_LO << "\n";
     const auto begin_last_verify = std::chrono::steady_clock::now();
 #endif
-   if (last_model_from_LO && IS_FUNDAMENTAL) {
-       Score new_score; Mat new_model;
-       if (parallel)
-           _quality->getInliers(best_model, best_inliers_mask);
-       // run additional degeneracy check for F:
-       if (_degeneracy.dynamicCast<FundamentalDegeneracy>()->verifyFundamental(best_model, best_score, best_inliers_mask, new_model, new_score)) {
-#ifdef DEBUG
-            std::cout << "best model from LO is degenerate, score (" << best_score.score << ", " << best_score.inlier_number << "), new (" <<
-                new_score.score << "," << new_score.inlier_number <<"), sftb (" << best_score_model_not_from_LO.score << ", " << best_score_model_not_from_LO.inlier_number << ")" << "\n";
-#endif
+    if (last_model_from_LO && IS_FUNDAMENTAL && K1.empty() && K2.empty()) {
+        Score new_score; Mat new_model;
+        const double INL_THR = 0.80;
+        if (parallel)
+            _quality->getInliers(best_model, best_inliers_mask);
+        // run additional degeneracy check for F:
+        if (_degeneracy.dynamicCast<FundamentalDegeneracy>()->verifyFundamental(best_model, best_score, best_inliers_mask, new_model, new_score)) {
             // so-far-the-best F is degenerate
             // Update best F using non-degenerate F or the one which is not from LO
-           if (new_score.isBetter(best_score_model_not_from_LO)) {
-               best_score = new_score;
-               new_model.copyTo(best_model);
-           } else {
-               best_score = best_score_model_not_from_LO;
-               best_model_not_from_LO.copyTo(best_model);
-           }
-       } else { // so-far-the-best F is not degenerate
-           if (new_score.isBetter(best_score)) {
-                // if new model is better then update
-               best_score = new_score;
-               new_model.copyTo(best_model);
-           }
-       }
-   }
+            if (new_score.isBetter(best_score_model_not_from_LO) && new_score.inlier_number > INL_THR*best_score.inlier_number) {
+                best_score = new_score;
+                new_model.copyTo(best_model);
+            } else if (best_score_model_not_from_LO.inlier_number > INL_THR*best_score.inlier_number) {
+                best_score = best_score_model_not_from_LO;
+                best_model_not_from_LO.copyTo(best_model);
+            }
+        } else { // so-far-the-best F is not degenerate
+            if (new_score.isBetter(best_score)) {
+                 // if new model is better then update
+                best_score = new_score;
+                new_model.copyTo(best_model);
+            }
+        }
+    }
 
 #ifdef DEBUG
     degensac_time += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin_last_verify).count();
@@ -500,7 +471,6 @@ bool VSAC::run(::vsac::Output &vsac_output) {
               polished_model, polisher_score) && polisher_score.isBetter(best_score)) {
 #ifdef DEBUG
             polisher_time = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - temp_time).count();
-//            std::cout << "POLISHER IS BETTER (" << best_score.score << ", " << best_score.inlier_number << ") -> (" << polisher_score.score << ", " << polisher_score.inlier_number << ")\n";
 #endif
             best_score = polisher_score;
             polished_model.copyTo(best_model);
@@ -508,7 +478,6 @@ bool VSAC::run(::vsac::Output &vsac_output) {
 #ifdef DEBUG
         else {
             polisher_time = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - temp_time).count();
-//            std::cout << "POLISHER IS WORSE (" << best_score.score << ", " << best_score.inlier_number << ") -> (" << polisher_score.score << ", " << polisher_score.inlier_number << ")\n";
         }
 #endif
     }
@@ -540,10 +509,6 @@ bool VSAC::run(::vsac::Output &vsac_output) {
             const double lambda = getLambda(inliers_list, 1.644, points_size, sample_size, true, min_non_rand_inliers);
             const double cdf_lambda = Utils::getPoissonCDF(lambda, non_random_inls_best_model), cdf_N = pow(cdf_lambda, num_total_tested_models);
             model_conf = cdf_N < 0.9999 ? ::vsac::MODEL_CONFIDENCE ::RANDOM : ::vsac::MODEL_CONFIDENCE ::NON_RANDOM;
-#ifdef DEBUG
-            std::cout << "iters " << final_iters << " tested models " << num_total_tested_models << " ind best " << non_random_inls_best_model << " #inls " << best_score.inlier_number
-                      << " l " << lambda << " is random " << is_random << " & " ;
-#endif
         } else model_conf = ::vsac::MODEL_CONFIDENCE ::NON_RANDOM;
     }
 #ifdef DEBUG
@@ -558,7 +523,8 @@ bool VSAC::run(::vsac::Output &vsac_output) {
     if (IS_FUNDAMENTAL) {
         if (parallel) {
             vsac_output.K1 = K1_approx.clone(); vsac_output.K2 = K2_approx.clone();
-        } else _degeneracy.dynamicCast<FundamentalDegeneracy>()->getApproximatedIntrinsics(vsac_output.K1, vsac_output.K2);
+        } else if (dynamic_cast<const FundamentalDegeneracy*>(_degeneracy.get()) != nullptr)
+            _degeneracy.dynamicCast<FundamentalDegeneracy>()->getApproximatedIntrinsics(vsac_output.K1, vsac_output.K2);
     }
     return true;
 }

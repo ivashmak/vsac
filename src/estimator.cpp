@@ -18,7 +18,7 @@ public:
     int estimateModelNonMinimalSample(const std::vector<int> &sample, int sample_size,
             std::vector<Mat> &models, const std::vector<double> &weights) const override {
         return non_min_solver->estimate (sample, sample_size, models, weights);
-    };
+    }
     int getMaxNumSolutions () const override {
         return min_solver->getMaxNumberOfSolutions();
     }
@@ -96,7 +96,6 @@ public:
 
     inline int
     estimateModels(const std::vector<int> &sample, std::vector<Mat> &models) const override {
-        // return min_solver->estimate(sample, models);
         std::vector<Mat> E;
         const int models_count = min_solver->estimate(sample, E);
         int valid_models_count = 0;
@@ -113,7 +112,7 @@ public:
     int estimateModelNonMinimalSample(const std::vector<int> &sample, int sample_size,
             std::vector<Mat> &models, const std::vector<double> &weights) const override {
         return non_min_solver->estimate(sample, sample_size, models, weights);
-    };
+    }
     int getMaxNumSolutions () const override {
         return min_solver->getMaxNumberOfSolutions();
     }
@@ -511,9 +510,9 @@ public:
         m11 = (float)m[0]; m12 = (float)m[1]; m13 = (float)m[2];
         m21 = (float)m[3]; m22 = (float)m[4]; m23 = (float)m[5];
     }
-    inline float getError (int point_idx) const override {
-        const int smpl = 4*point_idx;
-        const float x1=points[smpl], y1=points[smpl+1], x2=points[smpl+2], y2=points[smpl+3];
+    inline float getError (int idx) const override {
+        idx *= 4;
+        const float x1=points[idx], y1=points[idx+1], x2=points[idx+2], y2=points[idx+3];
         const float dx2 = x2 - (m11 * x1 + m12 * y1 + m13), dy2 = y2 - (m21 * x1 + m22 * y1 + m23);
         return dx2 * dx2 + dy2 * dy2;
     }

@@ -51,13 +51,13 @@ Ptr<StandardTerminationCriteria> StandardTerminationCriteria::create(double conf
 /////////////////////////////////////// SPRT TERMINATION //////////////////////////////////////////
 class SPRTTerminationImpl : public SPRTTermination {
 private:
-    const std::vector<SPRT_history> &sprt_histories;
+    const Ptr<AdaptiveSPRT> sprt;
     const double log_eta_0;
     const int points_size, sample_size, MAX_ITERATIONS;
 public:
-    SPRTTerminationImpl (const std::vector<SPRT_history> &sprt_histories_, double confidence,
+    SPRTTerminationImpl (const Ptr<AdaptiveSPRT> &sprt_, double confidence,
            int points_size_, int sample_size_, int max_iterations_)
-           : sprt_histories (sprt_histories_), log_eta_0(log(1-confidence)),
+           : sprt (sprt_), log_eta_0(log(1-confidence)),
            points_size (points_size_), sample_size (sample_size_),MAX_ITERATIONS(max_iterations_){}
 
     /*
@@ -78,8 +78,9 @@ public:
      * nR = (1 - P_g)^k
      */
     int update (const Mat &/*model*/, int inlier_size) const override {
-        if (sprt_histories.empty())
-            return std::min(MAX_ITERATIONS, getStandardUpperBound(inlier_size));
+        const auto &sprt_histories = sprt->getSPRTvector();
+        if (sprt_histories.size() <= 1)
+            return getStandardUpperBound(inlier_size);
 
         const double epsilon = static_cast<double>(inlier_size) / points_size; // inlier probability
         const double P_g = pow (epsilon, sample_size); // probability of good sample
@@ -87,23 +88,21 @@ public:
         double log_eta_lmin1 = 0;
 
         int total_number_of_tested_samples = 0;
-        const int sprts_size_min1 = static_cast<int>(sprt_histories.size())-1;
-        if (sprts_size_min1 < 0) return getStandardUpperBound(inlier_size);
         // compute log n(l-1), l is number of tests
-        for (int test = 0; test < sprts_size_min1; test++) {
-            log_eta_lmin1 += log (1 - P_g * (1 - pow (sprt_histories[test].A,
-             -computeExponentH(sprt_histories[test].epsilon, epsilon,sprt_histories[test].delta))))
-                         * sprt_histories[test].tested_samples;
-            total_number_of_tested_samples += sprt_histories[test].tested_samples;
+        for (const auto &test : sprt_histories) {
+            if (test.tested_samples == 0) continue;
+            log_eta_lmin1 += log (1 - P_g * (1 - pow (test.A,
+               -computeExponentH(test.epsilon, epsilon,test.delta)))) * test.tested_samples;
+            total_number_of_tested_samples += test.tested_samples;
         }
 
         // Implementation note: since η > ηR the equation (9) does not have to be evaluated
         // before ηR < η0 is satisfied.
         if (std::pow(1 - P_g, total_number_of_tested_samples) < log_eta_0)
-            return std::min(MAX_ITERATIONS, getStandardUpperBound(inlier_size));
+            return getStandardUpperBound(inlier_size);
         // use decision threshold A for last test (l-th)
-        const double predicted_iters_sprt = (log_eta_0 - log_eta_lmin1) /
-                log (1 - P_g * (1 - 1 / sprt_histories[sprts_size_min1].A)); // last A
+        const double predicted_iters_sprt = total_number_of_tested_samples + (log_eta_0 - log_eta_lmin1) /
+                log (1 - P_g * (1 - 1 / sprt_histories.back().A)); // last A
         if (std::isnan(predicted_iters_sprt) || std::isinf(predicted_iters_sprt))
             return getStandardUpperBound(inlier_size);
 
@@ -149,9 +148,9 @@ private:
         return h;
     }
 };
-Ptr<SPRTTermination> SPRTTermination::create(const std::vector<SPRT_history> &sprt_histories_,
+Ptr<SPRTTermination> SPRTTermination::create(const Ptr<AdaptiveSPRT> &sprt_,
     double confidence, int points_size_, int sample_size_, int max_iterations_) {
-    return makePtr<SPRTTerminationImpl>(sprt_histories_, confidence, points_size_, sample_size_,
+    return makePtr<SPRTTerminationImpl>(sprt_, confidence, points_size_, sample_size_,
                     max_iterations_);
 }
 
@@ -159,16 +158,15 @@ Ptr<SPRTTermination> SPRTTermination::create(const std::vector<SPRT_history> &sp
 class SPRTPNapsacTerminationImpl : public SPRTPNapsacTermination {
 private:
     SPRTTerminationImpl sprt_termination;
-    const std::vector<SPRT_history> &sprt_histories;
     const double relax_coef, log_confidence;
     const int points_size, sample_size, MAX_ITERS;
 public:
 
-    SPRTPNapsacTerminationImpl (const std::vector<SPRT_history> &sprt_histories_,
+    SPRTPNapsacTerminationImpl (const Ptr<AdaptiveSPRT> &sprt,
             double confidence, int points_size_, int sample_size_,
             int max_iterations_, double relax_coef_)
-            : sprt_termination (sprt_histories_, confidence, points_size_, sample_size_,
-            max_iterations_), sprt_histories (sprt_histories_),
+            : sprt_termination (sprt, confidence, points_size_, sample_size_,
+            max_iterations_),
             relax_coef (relax_coef_), log_confidence(log(1-confidence)),
           points_size (points_size_), sample_size (sample_size_),
           MAX_ITERS (max_iterations_) {}
@@ -187,10 +185,10 @@ public:
         return predicted_iterations;
     }
 };
-Ptr<SPRTPNapsacTermination> SPRTPNapsacTermination::create(const std::vector<SPRT_history>&
-        sprt_histories_, double confidence, int points_size_, int sample_size_,
+Ptr<SPRTPNapsacTermination> SPRTPNapsacTermination::create(const Ptr<AdaptiveSPRT> &
+        sprt, double confidence, int points_size_, int sample_size_,
         int max_iterations_, double relax_coef_) {
-    return makePtr<SPRTPNapsacTerminationImpl>(sprt_histories_, confidence, points_size_,
+    return makePtr<SPRTPNapsacTerminationImpl>(sprt, confidence, points_size_,
                    sample_size_, max_iterations_, relax_coef_);
 }
 
@@ -307,13 +305,12 @@ public:
         for (int pt = 0; pt < min_termination_length; pt++)
             if (errors[pt] < inlier_threshold)
                 num_inliers_under_termination_len++;
-
         for (int termination_len = min_termination_length; termination_len < points_size;termination_len++){
             if (errors[termination_len /* = point*/] < inlier_threshold) {
                 num_inliers_under_termination_len++;
 
                 // non-random constraint must satisfy I_n* ≥ I_min n*.
-                if (num_inliers_under_termination_len < non_random_inliers[termination_len])
+                if (num_inliers_under_termination_len < non_random_inliers[termination_len] || (double) num_inliers_under_termination_len/(points_size) < 0.2)
                     continue;
 
                 // add 1 to termination length since num_inliers_under_termination_len is updated

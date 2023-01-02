@@ -15,7 +15,7 @@ double getLambda (std::vector<int> &supports, double cdf_thr, int points_size,
     if (lambda < 1 || lower_than_cdf == 0) lambda = 1;
     // use 0.9999 quantile https://keisan.casio.com/exec/system/14060745333941
     if (! is_independent) // do not calculate it for all inliers
-        min_non_random_inliers = (int)(lambda + 3.719*sqrt(lambda * (1 - lambda / points_size))) + 1;
+        min_non_random_inliers = (int)(lambda + 2.32*sqrt(lambda * (1 - lambda / points_size))) + 1;
     return lambda;
 }
 
@@ -39,12 +39,13 @@ int VSAC::getIndependentInliers (const Mat &model_, const std::vector<int> &samp
             num_pts_validatin_or_constr = 0, pt1 = 0;
     const auto * const pts = params.isEssential() ? (float *) image_points.data : (float *) points.data;
     // scale for thresholds should be used
-    const float ep_thr_sqr = 1e-6, line_thr = .01, neigh_thr = 4;
+    const float ep_thr_sqr = 1e-6, line_thr = 0.01, neigh_thr = 4.0;
     float sign1=0,a1=0, b1=0, c1=0, a2=0, b2=0, c2=0, ep1_x, ep1_y, ep2_x, ep2_y;
     const auto * const m = (float *) model.data;
     Vec3f ep1;
     bool do_or_test = false, ep1_inf = false, ep2_inf = false;
     if (is_F) { // compute epipole and sign of the first point for orientation test
+        model *= (1/norm(model));
         ep1 = Utils::getRightEpipole(model);
         const Vec3f ep2 = Utils::getLeftEpipole(model);
         if (fabsf(ep1[2]) < DBL_EPSILON) {
@@ -143,8 +144,6 @@ int VSAC::getIndependentInliers (const Mat &model_, const std::vector<int> &samp
             for (int j = i+1; j < num_inliers; j++) {// verify through all including sample points
                 const int inl_idx_j = 4*inliers[j];
                 const auto X1 = pts[inl_idx_j], Y1 = pts[inl_idx_j+1], X2 = pts[inl_idx_j+2], Y2 = pts[inl_idx_j+3];
-//                const double dx1 = X1-x1, dy1 = Y1-y1, dx2 = X2-x2, dy2 = Y2-y2;
-//                if (dx1 * dx1 + dy1 * dy1 < neigh_thr_sqr || dx2 * dx2 + dy2 * dy2 < neigh_thr_sqr) {
                 // use L1 norm instead of L2 for faster evaluation
                 if (fabsf(X1-x1) + fabsf(Y1 - y1) < neigh_thr || fabsf(X2-x2) + fabsf(Y2 - y2) < neigh_thr) {
                     num_non_random_inliers--;

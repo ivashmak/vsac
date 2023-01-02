@@ -24,7 +24,7 @@ public:
 			for (int j = 0; j < 3; j++)
 				for (int k = 0; k < 3; k++)
 					T[i](j,k) = ten[cnt++];
-		std::vector<Vec3d> left_null(3), right_null(3);		
+		std::vector<Vec3d> left_null(3), right_null(3);
 		for (int i = 0; i < 3; i++) {
 			right_null[i] = getNullVector(Mat(T[i]));
 			left_null[i] = getNullVector(Mat(T[i].t()));
@@ -121,7 +121,7 @@ public:
 		std::vector<Vec3d> X5s(3), X6s(3);
 		getLambda(0, Bs[0], X5s[0], X6s[0]);
 		getLambda(1, Bs[1], X5s[1], X6s[1]);
-		getLambda(2, Bs[2], X5s[2], X6s[2]);	
+		getLambda(2, Bs[2], X5s[2], X6s[2]);
 
 		std::vector<double> A_vec(A.val, A.val+A.rows*A.cols);
 	    vsac::Math::eliminateUpperTriangular(A_vec, A.rows, A.cols);

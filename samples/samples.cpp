@@ -69,7 +69,7 @@ void Samples::example (ESTIMATION_TASK task) {
     }
     // advanced settings and parameters
     vsac::Params params (est_task, threshold, confidence, max_iters, sorted ? vsac::SamplingMethod::SAMPLING_PROSAC : vsac::SamplingMethod::SAMPLING_UNIFORM,
-            vsac::ScoreMethod::SCORE_METHOD_MSAC); // worth trying also SCORE_METHOD_MAGSAC, todo: change MSAC to MLESAC
+            vsac::ScoreMethod::SCORE_METHOD_MSAC); // worth trying also SCORE_METHOD_MAGSAC
     
     /////////////////////////////////////////////// OPTIONAL PARAMETERS //////////////////////////////
     // params.setRandomGeneratorState(random() % INT_MAX); // set state of the random generator

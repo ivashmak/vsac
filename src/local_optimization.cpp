@@ -58,7 +58,6 @@ public:
 
             // Build graph problem. Apply graph cut to G
             int labeling_inliers_size = labeling(new_model);
-            // std::cout << "labeling_inliers_size " << labeling_inliers_size << '\n';
             for (int iter = 0; iter < lo_inner_iterations; iter++) {
                 // sample to generate min (|I_7m|, |I|)
                 int num_of_estimated_models;
@@ -332,347 +331,305 @@ class SimpleLocalOptimizationImpl : public SimpleLocalOptimization {
 private:
     const Ptr<Quality> quality;
     const Ptr<Error> error;
-    const Ptr<Estimator> estimator;
+    const Ptr<NonMinimalSolver> estimator;
     const Ptr<Termination> termination;
     const Ptr<RandomGenerator> random_generator;
+    const Ptr<WeightFunction> weight_fnc;
     Ptr<RandomGenerator> random_generator2;
-    int points_size, max_lo_iters, non_min_sample_size, max_iters_ransac, current_ransac_iter;
+    int points_size, max_lo_iters, non_min_sample_size, current_ransac_iter;
     std::vector<double> weights;
     std::vector<int> inliers;
     std::vector<cv::Mat> models;
     double inlier_threshold_sqr;
     int num_lo_optimizations = 0;
+    bool updated_lo = false;
 public:
-    SimpleLocalOptimizationImpl (const Ptr<Quality> &quality_, const Ptr<Estimator> &estimator_,
-            const Ptr<Termination> termination_, const Ptr<RandomGenerator> &random_gen, int max_lo_iters_, double inlier_threshold_sqr_) :
-            quality(quality_), error(quality_->getErrorFnc()), estimator(estimator_), termination(termination_), random_generator(random_gen) {
+    SimpleLocalOptimizationImpl (const Ptr<Quality> &quality_, const Ptr<NonMinimalSolver> &estimator_,
+            const Ptr<Termination> termination_, const Ptr<RandomGenerator> &random_gen, Ptr<WeightFunction> weight_fnc_,
+            int max_lo_iters_, double inlier_threshold_sqr_, bool update_lo_) :
+            quality(quality_), error(quality_->getErrorFnc()), estimator(estimator_), termination(termination_),
+            random_generator(random_gen), weight_fnc(weight_fnc_) {
         max_lo_iters = max_lo_iters_;
         non_min_sample_size = random_generator->getSubsetSize();
-        max_iters_ransac = INT_MAX;
         current_ransac_iter = 0;
         inliers = std::vector<int>(quality_->getPointsSize());
-        models = std::vector<cv::Mat>(estimator_->getMaxNumSolutionsNonMinimal());
+        models = std::vector<cv::Mat>(estimator_->getMaxNumberOfSolutions());
         points_size = quality_->getPointsSize();
         inlier_threshold_sqr = inlier_threshold_sqr_;
+        if (weight_fnc != nullptr) weights = std::vector<double>(points_size);
         random_generator2 = nullptr;
+        updated_lo = update_lo_;
     }
     void setCurrentRANSACiter (int ransac_iter) override { current_ransac_iter = ransac_iter; }
-    int getMaxIterations () const override { return max_iters_ransac; }
     int getNumLOoptimizations () const override { return num_lo_optimizations; }
     bool refineModel (const Mat &best_model, const Score &best_model_score, Mat &new_model, Score &new_model_score) override {
         new_model_score = best_model_score;
         best_model.copyTo(new_model);
 
-        int num_inliers = Quality::getInliers(error, best_model, inliers, inlier_threshold_sqr);
+        int num_inliers;
+        if (weights.empty())
+            num_inliers = Quality::getInliers(error, best_model, inliers, inlier_threshold_sqr);
+        else num_inliers = weight_fnc->getInliersWeights(error->getErrors(best_model), inliers, weights);
         auto update_generator = [&] (int num_inls) {
             if (num_inls <= non_min_sample_size) {
                 // add new random generator if number of inliers is fewer than non-minimal sample size
                 const int new_sample_size = (int)(0.6*num_inls);
-                if (new_sample_size <= estimator->getNonMinimalSampleSize())
+                if (new_sample_size <= estimator->getMaxNumberOfSolutions())
                     return false;
                 if (random_generator2 == nullptr)
-                    random_generator2 = UniformRandomGenerator::create(-1, quality->getPointsSize(), new_sample_size);
+                    random_generator2 = UniformRandomGenerator::create(num_inls/*state*/, quality->getPointsSize(), new_sample_size);
                 else random_generator2->setSubsetSize(new_sample_size);
             }
             return true;
         };
         if (!update_generator(num_inliers))
-            return false;        
+            return false;
 
-        for (int iter = 0; iter < max_lo_iters; iter++) {
+        int max_lo_iters_ = max_lo_iters, last_update = 0, last_inliers_update = 0;
+        for (int iter = 0; iter < max_lo_iters_; iter++) {
             int num_models;
             if (num_inliers <= non_min_sample_size)
-                 num_models = estimator->estimateModelNonMinimalSample(random_generator2->generateUniqueRandomSubset(inliers, num_inliers),
+                 num_models = estimator->estimate(new_model, random_generator2->generateUniqueRandomSubset(inliers, num_inliers),
                         random_generator2->getSubsetSize(), models, weights);
-            else num_models = estimator->estimateModelNonMinimalSample(random_generator->generateUniqueRandomSubset(inliers, num_inliers), non_min_sample_size, models, weights);
-
+            else num_models = estimator->estimate(new_model, random_generator->generateUniqueRandomSubset(inliers, num_inliers), non_min_sample_size, models, weights);
             for (int m = 0; m < num_models; m++) {
                 const auto score = quality->getScore(models[m]);
                 if (score.isBetter(new_model_score)) {
+                    last_update = iter; last_inliers_update = new_model_score.inlier_number - score.inlier_number;
+                    if (updated_lo) {
+                        if (max_lo_iters_ < iter + 5 && last_inliers_update >= 1) {
+                            max_lo_iters_ = iter + 5;
+                        }
+                    }
                     models[m].copyTo(new_model);
                     new_model_score = score;
                     if (termination != nullptr && current_ransac_iter > termination->update(new_model, new_model_score.inlier_number))
-                        return true; // terminate LO if max number of iterations reached 
+                        return true; // terminate LO if max number of iterations reached
                     if (score.inlier_number >= best_model_score.inlier_number ||
                         score.inlier_number > non_min_sample_size) {
-                        // update inliers if new model has more than previous best model    
-                        num_inliers = Quality::getInliers(error, new_model, inliers, inlier_threshold_sqr);
+                        // update inliers if new model has more than previous best model
+                        if (weights.empty())
+                            num_inliers = Quality::getInliers(error, best_model, inliers, inlier_threshold_sqr);
+                        else num_inliers = weight_fnc->getInliersWeights(error->getErrors(best_model), inliers, weights);
                         if (!update_generator(num_inliers))
                             return true;
                     }
                 }
+            }
+            if (updated_lo && iter - last_update >= 10) {
+                break;
             }
         }
         return true;
     }
 };
 Ptr<SimpleLocalOptimization> SimpleLocalOptimization::create (const Ptr<Quality> &quality_,
-        const Ptr<Estimator> &estimator_, const Ptr<Termination> termination_, const Ptr<RandomGenerator> &random_gen, int max_lo_iters_, double inlier_thr_sqr) {
-    return makePtr<SimpleLocalOptimizationImpl> (quality_, estimator_, termination_, random_gen, max_lo_iters_, inlier_thr_sqr);
+        const Ptr<NonMinimalSolver> &estimator_, const Ptr<Termination> termination_, const Ptr<RandomGenerator> &random_gen,
+        const Ptr<WeightFunction> weight_fnc, int max_lo_iters_, double inlier_thr_sqr, bool updated_lo) {
+    return makePtr<SimpleLocalOptimizationImpl> (quality_, estimator_, termination_, random_gen, weight_fnc, max_lo_iters_, inlier_thr_sqr, updated_lo);
 }
 
-class SigmaConsensusImpl : public SigmaConsensus {
+class GaussWeightFunctionImpl : public GaussWeightFunction {
 private:
-    const Ptr<Estimator> estimator;
-    const Ptr<Quality> quality;
-    const Ptr<Error> error;
-    const Ptr<ModelVerifier> verifier;
-    const Ptr<GammaValues> gamma_generator;
-    // The degrees of freedom of the data from which the model is estimated.
-    // E.g., for models coming from point correspondences (x1,y1,x2,y2), it is 4.
-    const int degrees_of_freedom;
-    // A 0.99 quantile of the Chi^2-distribution to convert sigma values to residuals
-    const double k;
-    // Calculating (DoF - 1) / 2 which will be used for the estimation and,
-    // due to being constant, it is better to calculate it a priori.
-    double dof_minus_one_per_two;
-    const double C;
-    // The size of a minimal sample used for the estimation
-    const int sample_size;
-    // Calculating 2^(DoF - 1) which will be used for the estimation and,
-    // due to being constant, it is better to calculate it a priori.
-    double two_ad_dof;
-    // Calculating C * 2^(DoF - 1) which will be used for the estimation and,
-    // due to being constant, it is better to calculate it a priori.
-    double C_times_two_ad_dof;
-    // Calculating the gamma value of (DoF - 1) / 2 which will be used for the estimation and,
-    // due to being constant, it is better to calculate it a priori.
-    double squared_sigma_max_2, one_over_sigma;
-    // Calculating the upper incomplete gamma value of (DoF - 1) / 2 with k^2 / 2.
-    const double gamma_k;
-    // Calculating the lower incomplete gamma value of (DoF - 1) / 2 which will be used for the estimation and,
-    // due to being constant, it is better to calculate it a priori.
-    double max_sigma_sqr;
-    const int points_size, number_of_irwls_iters;
-    const double maximum_threshold, max_sigma;
-
-    std::vector<double> sqr_residuals, sigma_weights;
-    std::vector<int> sqr_residuals_idxs;
-    // Models fit by weighted least-squares fitting
-    std::vector<Mat> sigma_models;
-    // Points used in the weighted least-squares fitting
-    std::vector<int> sigma_inliers;
-    // Weights used in the the weighted least-squares fitting
-    int max_lo_sample_size, stored_gamma_number_min1;
-    double scale_of_stored_gammas;
-    RNG rng;
-    const std::vector<double> &stored_gamma_values;
-
-    Ptr<Termination> termination;
-    int num_lo_optimizations = 0, current_ransac_iter = 0;
+    double thr_sqr, sigma_sqr, norm_const, norm_const_pi, out_prob, out_p;
 public:
-    void setCurrentRANSACiter (int ransac_iter) override { current_ransac_iter = ransac_iter; }
-
-    SigmaConsensusImpl (const Ptr<Estimator> &estimator_, const Ptr<Quality> &quality_, 
-        const Ptr<ModelVerifier> &verifier_, const Ptr<GammaValues> &gamma_generator_,
-        int max_lo_sample_size_, int number_of_irwls_iters_, int DoF,
-        double sigma_quantile, double upper_incomplete_of_sigma_quantile, double C_,
-        double maximum_thr, Ptr<Termination> termination_) : estimator (estimator_), quality(quality_),
-          error (quality_->getErrorFnc()), verifier(verifier_), gamma_generator(gamma_generator_),
-          degrees_of_freedom(DoF), k (sigma_quantile), C(C_),
-          sample_size(estimator_->getMinimalSampleSize()),
-          gamma_k (upper_incomplete_of_sigma_quantile), points_size (quality_->getPointsSize()),
-          number_of_irwls_iters (number_of_irwls_iters_),
-          maximum_threshold(maximum_thr), max_sigma (maximum_thr),
-          stored_gamma_values (gamma_generator_->getGammaValues()), termination(termination_) {
-
-        dof_minus_one_per_two = (degrees_of_freedom - 1.0) / 2.0;
-        two_ad_dof = std::pow(2.0, dof_minus_one_per_two);
-        C_times_two_ad_dof = C * two_ad_dof;
-        // Calculate 2 * \sigma_{max}^2 a priori
-        squared_sigma_max_2 = max_sigma * max_sigma * 2.0;
-        // Divide C * 2^(DoF - 1) by \sigma_{max} a priori
-        one_over_sigma = C_times_two_ad_dof / max_sigma;
-        max_sigma_sqr = squared_sigma_max_2 * 0.5;
-        sqr_residuals = std::vector<double>(points_size);
-        sqr_residuals_idxs = std::vector<int>(points_size);
-        sigma_inliers = std::vector<int>(points_size);
-        max_lo_sample_size = max_lo_sample_size_;
-        sigma_weights = std::vector<double>(points_size);
-        sigma_models = std::vector<Mat>(estimator->getMaxNumSolutionsNonMinimal());
-        stored_gamma_number_min1 = gamma_generator->getTableSize()-1;
-        scale_of_stored_gammas = gamma_generator->getScaleOfGammaValues();
+    GaussWeightFunctionImpl (double thr, double sigma, double out_p_) {
+        thr_sqr = thr*thr;
+        out_p = out_p_;
+        sigma_sqr = sigma * sigma;
+        norm_const = -1 / (2 * sigma_sqr);
+        norm_const_pi = 1 / (sigma * sqrt(2 * M_PI));
+        out_prob = out_p_;//sigma_sqr * (1 / (1 - out_p) - 1);
     }
-
-    // https://github.com/danini/magsac
-    bool refineModel (const Mat &in_model, const Score &best_model_score,
-                      Mat &new_model, Score &new_model_score) override {
-        int residual_cnt = 0;
-        error->setModelParameters(in_model);
-        for (int point_idx = 0; point_idx < points_size; ++point_idx) {
-            const double sqr_residual = error->getError(point_idx);
-            if (sqr_residual < max_sigma_sqr) {
-                // Store the residual of the current point and its index
-                sqr_residuals[residual_cnt] = sqr_residual;
-                sqr_residuals_idxs[residual_cnt++] = point_idx;
-            }
-
-            if (residual_cnt + points_size - point_idx < best_model_score.inlier_number)
-                return false;
-        }
-        if (residual_cnt <= sample_size)
-            return false;
-        in_model.copyTo(new_model);
-        new_model_score = Score();
-
-        // Do the iteratively re-weighted least squares fitting
-        bool is_updated = false;
-        for (int iterations = 0; iterations < number_of_irwls_iters; iterations++) {
-            int sigma_inliers_cnt = 0;
-            // If the current iteration is not the first, the set of possibly inliers
-            // (i.e., points closer than the maximum threshold) have to be recalculated.
-            if (iterations > 0) {
-                // error->setModelParameters(polished_model);
-                error->setModelParameters(new_model);
-                // Remove everything from the residual vector
-                residual_cnt = 0;
-
-                // Collect the points which are closer than the maximum threshold
-                for (int point_idx = 0; point_idx < points_size; ++point_idx) {
-                    // Calculate the residual of the current point
-                    const double sqr_residual = error->getError(point_idx);
-                    if (sqr_residual < max_sigma_sqr) {
-                        // Store the residual of the current point and its index
-                        sqr_residuals[residual_cnt] = sqr_residual;
-                        sqr_residuals_idxs[residual_cnt++] = point_idx;
-                    }
-                }
-                sigma_inliers_cnt = 0;
-            }
-
-            // Calculate the weight of each point
-            for (int i = 0; i < residual_cnt; i++) {
-                // Get the position of the gamma value in the lookup table
-                int x = (int)round(scale_of_stored_gammas * sqr_residuals[i]
-                        / squared_sigma_max_2);
-
-                // If the sought gamma value is not stored in the lookup, return the closest element
-                if (x >= stored_gamma_number_min1 || x < 0 /*overflow*/) // actual number of gamma values is 1 more, so >=
-                    x  = stored_gamma_number_min1;
-
-                sigma_inliers[sigma_inliers_cnt] = sqr_residuals_idxs[i]; // store index of point for LSQ
-                sigma_weights[sigma_inliers_cnt++] = one_over_sigma * (stored_gamma_values[x] - gamma_k);
-            }
-
-            // random shuffle sigma inliers
-            if (sigma_inliers_cnt > max_lo_sample_size)
-                for (int i = sigma_inliers_cnt-1; i > 0; i--) {
-                    const int idx = rng.uniform(0, i+1);
-                    std::swap(sigma_inliers[i], sigma_inliers[idx]);
-                    std::swap(sigma_weights[i], sigma_weights[idx]);
-                }
-            else if (iterations > 0 && !is_updated) break;
-            const int num_est_models = estimator->estimateModelNonMinimalSample
-                  (sigma_inliers, std::min(max_lo_sample_size, sigma_inliers_cnt),
-                          sigma_models, sigma_weights);
-
-            if (num_est_models == 0)
-                break; // break iterations
-
-            // Update the model parameters
-            Mat polished_model = sigma_models[0];
-            Score sigma_best_score = quality->getScore(polished_model);
-            if (num_est_models > 1) {
-                // find best over other models
-                for (int m = 1; m < num_est_models; m++) {
-                    const Score sc = quality->getScore(sigma_models[m]);
-                    if (sc.isBetter(sigma_best_score)) {
-                        polished_model = sigma_models[m];
-                        sigma_best_score = sc;
-                    }
-                }
-            }
-            if (sigma_best_score.isBetter(new_model_score)) {
-                new_model_score = sigma_best_score;
-                polished_model.copyTo(new_model);
-                is_updated = true;
-                if (termination != nullptr && current_ransac_iter > termination->update(new_model, new_model_score.inlier_number))
-                    break;
-            } else is_updated = false;
-        }
-
-        return true;
+    int getInliersWeights (const std::vector<float> &errors, std::vector<int> &inliers, std::vector<double> &weights) const override {
+        return getInliersWeights(errors, inliers, weights, norm_const, norm_const_pi, out_prob, thr_sqr);
     }
-    int getNumLOoptimizations () const override { return num_lo_optimizations; }
+    int getInliersWeights (const std::vector<float> &errors, std::vector<int> &inliers, std::vector<double> &weights, double thr_sqr_) const override {
+        return getInliersWeights(errors, inliers, weights, -1 / (2 * thr_sqr), 1 / (sqrt(thr_sqr) * sqrt(2 * M_PI)), thr_sqr * (1 / (1 - out_p) - 1), thr_sqr_);
+    }
+    double getThreshold() const override { return thr_sqr; }
+private:
+    int getInliersWeights (const std::vector<float> &errors, std::vector<int> &inliers, std::vector<double> &weights, double n, double n_pi, double out_p_, double thr_sqr_) const {
+        int num_inliers = 0, i = 0;
+        for (const auto &e : errors) {
+            if (e < thr_sqr_) {
+                const auto p = exp(e * n) * n_pi;
+                inliers[num_inliers] = i;
+                weights[num_inliers++] = p;
+            }
+            i++;
+        }
+        return num_inliers;
+    }
 };
-Ptr<SigmaConsensus>
-SigmaConsensus::create(const Ptr<Estimator> &estimator_,
-        const Ptr<Quality> &quality, const Ptr<ModelVerifier> &verifier_,
-        const Ptr<GammaValues> &gamma_generator, int max_lo_sample_size, int number_of_irwls_iters_, int DoF,
-        double sigma_quantile, double upper_incomplete_of_sigma_quantile, double C_,
-        double maximum_thr, Ptr<Termination> termination_) {
-    return makePtr<SigmaConsensusImpl>(estimator_, quality, verifier_, gamma_generator,
-            max_lo_sample_size, number_of_irwls_iters_, DoF, sigma_quantile,
-            upper_incomplete_of_sigma_quantile, C_, maximum_thr, termination_);
+Ptr<GaussWeightFunction> GaussWeightFunction::create(double thr, double sigma, double outlier_prob) {
+    return makePtr<GaussWeightFunctionImpl>(thr, sigma, outlier_prob);
+}
+
+
+class MagsacWeightFunctionImpl : public MagsacWeightFunction {
+private:
+    const std::vector<double> &stored_gamma_values;
+    double C, max_sigma, max_sigma_sqr, scale_of_stored_gammas, one_over_sigma, gamma_k, squared_sigma_max_2, rescale_err;
+    int DoF;
+    unsigned int stored_gamma_number_min1;
+public:
+    MagsacWeightFunctionImpl (const Ptr<GammaValues> &gamma_generator,
+            int DoF_, double upper_incomplete_of_sigma_quantile, double C_, double max_sigma_) :
+            stored_gamma_values (gamma_generator->getGammaValues()) {
+        gamma_k = upper_incomplete_of_sigma_quantile;
+        stored_gamma_number_min1 = static_cast<unsigned int>(gamma_generator->getTableSize()-1);
+        scale_of_stored_gammas = gamma_generator->getScaleOfGammaValues();
+        DoF = DoF_; C = C_;
+        max_sigma = max_sigma_;
+        squared_sigma_max_2 = max_sigma * max_sigma * 2.0;
+        one_over_sigma = C * pow(2.0, (DoF - 1.0) * 0.5) / max_sigma;
+        max_sigma_sqr = squared_sigma_max_2 * 0.5;
+        rescale_err = scale_of_stored_gammas / squared_sigma_max_2;
+    }
+    int getInliersWeights (const std::vector<float> &errors, std::vector<int> &inliers, std::vector<double> &weights) const override {
+        return getInliersWeights(errors, inliers, weights, one_over_sigma, rescale_err, max_sigma_sqr);
+    }
+    int getInliersWeights (const std::vector<float> &errors, std::vector<int> &inliers, std::vector<double> &weights, double thr_sqr) const override {
+        const auto _max_sigma = thr_sqr;
+        const auto _squared_sigma_max_2 = _max_sigma * _max_sigma * 2.0;
+        const auto _one_over_sigma = C * pow(2.0, (DoF - 1.0) * 0.5) / _max_sigma;
+        const auto _max_sigma_sqr = _squared_sigma_max_2 * 0.5;
+        const auto _rescale_err = scale_of_stored_gammas / _squared_sigma_max_2;
+        return getInliersWeights(errors, inliers, weights, _one_over_sigma, _rescale_err, _max_sigma_sqr);
+    }
+    double getThreshold () const override {
+        return max_sigma_sqr;
+    }
+private:
+    int getInliersWeights (const std::vector<float> &errors, std::vector<int> &inliers, std::vector<double> &weights,
+            double _one_over_sigma, double _rescale_err, double _max_sigma_sqr) const {
+        int num_inliers = 0, p = 0;
+        for (const auto &e : errors) {
+            // Calculate the residual of the current point
+            if (e < _max_sigma_sqr) {
+                // Get the position of the gamma value in the lookup table
+                auto x = static_cast<unsigned int>(_rescale_err * e);
+                if (x > stored_gamma_number_min1)
+                    x = stored_gamma_number_min1;
+                inliers[num_inliers] = p; // store index of point for LSQ
+                weights[num_inliers++] = _one_over_sigma * (stored_gamma_values[x] - gamma_k);
+            }
+            p++;
+        }
+        return num_inliers;
+    }
+};
+Ptr<MagsacWeightFunction> MagsacWeightFunction::create(const Ptr<GammaValues> &gamma_generator_,
+            int DoF_, double upper_incomplete_of_sigma_quantile, double C_, double max_sigma_) {
+    return makePtr<MagsacWeightFunctionImpl>(gamma_generator_, DoF_, upper_incomplete_of_sigma_quantile, C_, max_sigma_);
 }
 
 /////////////////////////////////////////// FINAL MODEL POLISHER ////////////////////////
-class LeastSquaresPolishingImpl : public LeastSquaresPolishing {
+class NonMinimalPolisherImpl : public NonMinimalPolisher {
 private:
-    const Ptr<Estimator> estimator;
     const Ptr<Quality> quality;
-    int lsq_iterations;
-    std::vector<int> inliers;
+    const Ptr<NonMinimalSolver> solver;
+    const Ptr<Error> error_fnc;
+    const Ptr<WeightFunction> weight_fnc;
+    std::vector<bool> mask, mask_best;
     std::vector<Mat> models;
     std::vector<double> weights;
+    std::vector<float> errors_best;
+    std::vector<int> inliers;
+    double threshold, iou_thr, max_thr;
+    int max_iters, points_size;
+    bool is_covariance, CHANGE_WEIGHTS = true;
 public:
-    LeastSquaresPolishingImpl(const Ptr<Estimator> &estimator_, const Ptr<Quality> &quality_,
-            int lsq_iterations_) :
-            estimator(estimator_), quality(quality_) {
-        lsq_iterations = lsq_iterations_;
-        // allocate memory for inliers array and models
-        inliers = std::vector<int>(quality_->getPointsSize());
-        models = std::vector<Mat>(estimator->getMaxNumSolutionsNonMinimal());
+    NonMinimalPolisherImpl (const Ptr<Quality> &quality_, const Ptr<NonMinimalSolver> &solver_,
+            Ptr<WeightFunction> weight_fnc_, int max_iters_, double iou_thr_) :
+            quality(quality_), solver(solver_), error_fnc(quality_->getErrorFnc()), weight_fnc(weight_fnc_) {
+        max_iters = max_iters_;
+        points_size = quality_->getPointsSize();
+        threshold = quality_->getThreshold();
+        iou_thr = iou_thr_;
+        is_covariance = dynamic_cast<const cv::vsac::CovarianceSolver*>(solver_.get()) != nullptr;
+        mask = std::vector<bool>(points_size);
+        mask_best = std::vector<bool>(points_size);
+        inliers = std::vector<int>(points_size);
+        if (weight_fnc != nullptr) {
+            weights = std::vector<double>(points_size);
+            max_thr = weight_fnc->getThreshold();
+            if (is_covariance)
+                CV_Error(cv::Error::StsBadArg, "Covariance polisher cannot be combined with weights!");
+        }
     }
 
-    bool polishSoFarTheBestModel(const Mat &model, const Score &best_model_score,
-                                 Mat &new_model, Score &out_score) override {
-        // get inliers from input model
-        int inlier_number = quality->getInliers(model, inliers);
-        if (inlier_number < estimator->getMinimalSampleSize())
-            return false;
-
-        out_score = Score(); // set the worst case
-
-        // several all-inlier least-squares refines model better than only one but for
-        // big amount of points may be too time-consuming.
-        for (int lsq_iter = 0; lsq_iter < lsq_iterations; lsq_iter++) {
-            bool model_updated = false;
-
-            // estimate non minimal models with all inliers
-            const int num_models = estimator->estimateModelNonMinimalSample(inliers,
-                                                      inlier_number, models, weights);
-            for (int model_idx = 0; model_idx < num_models; model_idx++) {
-                const Score score = quality->getScore(models[model_idx]);
-                if (best_model_score.isBetter(score))
-                    continue;
-                if (score.isBetter(out_score)) {
-                    models[model_idx].copyTo(new_model);
-                    out_score = score;
-                    model_updated = true;
+    bool polishSoFarTheBestModel (const Mat &model, const Score &best_model_score,
+                                  Mat &new_model, Score &new_model_score) override {
+        int num_inliers = 0;
+        if (weights.empty()) {
+            quality->getInliers(model, mask_best);
+            if (!is_covariance)
+                for (int p = 0; p < points_size; p++)
+                    if (mask_best[p]) inliers[num_inliers++] = p;
+        } else {
+            errors_best = error_fnc->getErrors(model);
+            num_inliers = weight_fnc->getInliersWeights(errors_best, inliers, weights, max_thr);
+        }
+        new_model_score = best_model_score;
+        model.copyTo(new_model);
+        int last_update = -1;
+        for (int iter = 0; iter < max_iters; iter++) {
+            int num_sols;
+            if (is_covariance) num_sols = solver->estimate(mask_best, models, weights);
+            else num_sols = solver->estimate(new_model, inliers, num_inliers, models, weights);
+            Score prev_score;
+            for (int i = 0; i < num_sols; i++) {
+                const auto &errors = error_fnc->getErrors(models[i]);
+                const auto score = quality->getScore(errors);
+                if (score.isBetter(new_model_score)) {
+                    last_update = iter;
+                    models[i].copyTo(new_model);
+                    errors_best = errors;
+                    prev_score = new_model_score;
+                    new_model_score = score;
                 }
             }
-
-            if (!model_updated)
-                // if model was not updated at the first iteration then return false
-                // otherwise if all-inliers LSQ has not updated model then no sense
-                // to do it again -> return true (model was updated before).
-                return lsq_iter > 0;
-
-            // if number of inliers doesn't increase more than 5% then break
-            if (fabs(static_cast<double>(out_score.inlier_number) - static_cast<double>
-                 (best_model_score.inlier_number)) / best_model_score.inlier_number < 0.05)
-                return true;
-
-            if (lsq_iter != lsq_iterations - 1)
-                // if not the last LSQ normalization then get inliers for next normalization
-                inlier_number = quality->getInliers(new_model, inliers);
+            if (weights.empty()) {
+                if (iter > last_update)
+                    break;
+                else {
+                    Quality::getInliers(errors_best, mask, threshold);
+                    if (Utils::intersectionOverUnion(mask, mask_best) >= iou_thr)
+                        return true;
+                    mask_best = mask;
+                    num_inliers = 0;
+                    if (!is_covariance)
+                        for (int p = 0; p < points_size; p++)
+                            if (mask_best[p]) inliers[num_inliers++] = p;
+                }
+            } else {
+                if (iter > last_update) {
+                    // new model is worse
+                    if (CHANGE_WEIGHTS) {
+                        // if failed more than 5 times then break
+                        if (iter - std::max(0, last_update) >= 5)
+                            break;
+                        // try to change weights by changing threshold
+                        if (fabs(new_model_score.score - prev_score.score) < FLT_EPSILON) {
+                            // increase threshold if new model score is the same as the same as previous
+                            max_thr *= 1.05; // increase by 5%
+                        } else if (iter > last_update) {
+                            // decrease max threshold if model is worse
+                            max_thr *= 0.9;  // decrease by 10%
+                        }
+                    } else break; // break if not changing weights
+                }
+                // generate new weights and inliers
+                num_inliers = weight_fnc->getInliersWeights(errors_best, inliers, weights, max_thr);
+            }
         }
-        return true;
+        return last_update >= 0;
     }
 };
-Ptr<LeastSquaresPolishing> LeastSquaresPolishing::create (const Ptr<Estimator> &estimator_,
-         const Ptr<Quality> &quality_, int lsq_iterations_) {
-    return makePtr<LeastSquaresPolishingImpl>(estimator_, quality_, lsq_iterations_);
+Ptr<NonMinimalPolisher> NonMinimalPolisher::create(const Ptr<Quality> &quality_, const Ptr<NonMinimalSolver> &solver_,
+            Ptr<WeightFunction> weight_fnc_, int max_iters_, double iou_thr_) {
+    return makePtr<NonMinimalPolisherImpl>(quality_, solver_, weight_fnc_, max_iters_, iou_thr_);
 }
 }}

@@ -83,17 +83,9 @@ public:
 };
 
 //-------------------------- HOMOGRAPHY MATRIX -----------------------
-class HomographyMinimalSolver4ptsGEM : public MinimalSolver {
+class HomographyMinimalSolver4pts : public MinimalSolver {
 public:
-    static Ptr<HomographyMinimalSolver4ptsGEM> create(const Mat &points_);
-};
-class HomographySVDSolver : public MinimalSolver {
-public:
-    static Ptr<HomographySVDSolver> create (const Mat &points);
-};
-class FundamentalSVDSolver : public MinimalSolver {
-public:
-    static Ptr<FundamentalSVDSolver> create (const Mat &points);
+    static Ptr<HomographyMinimalSolver4pts> create(const Mat &points, bool use_ge);
 };
 class PnPSVDSolver : public MinimalSolver {
 public:
@@ -103,7 +95,7 @@ public:
 //-------------------------- FUNDAMENTAL MATRIX -----------------------
 class FundamentalMinimalSolver7pts : public MinimalSolver {
 public:
-    static Ptr<FundamentalMinimalSolver7pts> create(const Mat &points_);
+    static Ptr<FundamentalMinimalSolver7pts> create(const Mat &points, bool use_ge);
 };
 
 class FundamentalMinimalSolver8pts : public MinimalSolver {
@@ -112,9 +104,9 @@ public:
 };
 
 //-------------------------- ESSENTIAL MATRIX -----------------------
-class EssentialMinimalSolverStewenius5pts : public MinimalSolver {
+class EssentialMinimalSolver5pts : public MinimalSolver {
 public:
-    static Ptr<EssentialMinimalSolverStewenius5pts> create(const Mat &points, bool use_svd);
+    static Ptr<EssentialMinimalSolver5pts> create(const Mat &points, bool use_svd, bool is_nister);
 };
 
 //-------------------------- PNP -----------------------
@@ -143,8 +135,8 @@ public:
 //////////////////////////////////////// NON MINIMAL SOLVER ///////////////////////////////////////
 class NonMinimalSolver : public Algorithm {
 public:
-    virtual int estimate (const Mat &E, const std::vector<int> &sample, int sample_size, std::vector<Mat>
-        &models, const std::vector<double> &weights) const {
+    virtual int estimate (const Mat &/*model*/, const std::vector<int> &sample, int sample_size, std::vector<Mat>
+            &models, const std::vector<double> &weights) const {
         return estimate(sample, sample_size, models, weights);
     }
     // Estimate models from non minimal sample. models.size() == number of found solutions
@@ -154,21 +146,23 @@ public:
     virtual int getMinimumRequiredSampleSize() const = 0;
     // return maximum number of possible solutions.
     virtual int getMaxNumberOfSolutions () const = 0;
-    virtual void enforceRankConstraint (bool enforce) {}
+    virtual int estimate (const std::vector<bool> &/*mask*/, std::vector<Mat> &/*models*/,
+            const std::vector<double> &/*weights*/) { return 0; }
+    virtual void enforceRankConstraint (bool /*enforce*/) {}
 };
 
 //-------------------------- HOMOGRAPHY MATRIX -----------------------
 class HomographyNonMinimalSolver : public NonMinimalSolver {
 public:
     static Ptr<HomographyNonMinimalSolver> create(const Mat &points_);
-    static Ptr<HomographyNonMinimalSolver> create(const Mat &points_, const Matx33d &T1, const Matx33d &T2);
+    static Ptr<HomographyNonMinimalSolver> create(const Mat &points_, const Matx33d &T1, const Matx33d &T2, bool use_ge);
 };
 
 //-------------------------- FUNDAMENTAL MATRIX -----------------------
 class EpipolarNonMinimalSolver : public NonMinimalSolver {
 public:
     static Ptr<EpipolarNonMinimalSolver> create(const Mat &points_, bool is_fundamental);
-    static Ptr<EpipolarNonMinimalSolver> create(const Mat &points_, const Matx33d &T1, const Matx33d &T2);
+    static Ptr<EpipolarNonMinimalSolver> create(const Mat &points_, const Matx33d &T1, const Matx33d &T2, bool use_ge);
 };
 
 //-------------------------- ESSENTIAL MATRIX -----------------------
@@ -199,6 +193,11 @@ public:
     static Ptr<AffineNonMinimalSolver> create(const Mat &points, InputArray T1, InputArray T2);
 };
 
+class LarssonOptimizer : public NonMinimalSolver {
+public:
+    static Ptr<LarssonOptimizer> create(const Mat &calib_points_, const Matx33d &K1_, const Matx33d &K2_, int max_iters_, bool is_fundamental_);
+};
+
 ////////////////////////////////////////// SCORE ///////////////////////////////////////////
 class Score {
 public:
@@ -221,7 +220,7 @@ public:
 class GammaValues : public Algorithm {
 public:
     virtual ~GammaValues() override = default;
-    static Ptr<GammaValues> create(int DoF, int max_size_table=2000);
+    static Ptr<GammaValues> create(int DoF, int max_size_table=500);
     virtual const std::vector<double> &getCompleteGammaValues() const = 0;
     virtual const std::vector<double> &getIncompleteGammaValues() const = 0;
     virtual const std::vector<double> &getGammaValues() const = 0;
@@ -261,6 +260,20 @@ public:
             double threshold);
     static int getInliers (const std::vector<float> &errors, std::vector<int> &inliers,
             double threshold);
+    Score selectBest (const std::vector<Mat> &models, int num_models, Mat &best) {
+        if (num_models == 0) return {};
+        int best_idx = 0;
+        Score best_score = getScore(models[0]);
+        for (int i = 1; i < num_models; i++) {
+            const auto sc = getScore(models[i]);
+            if (sc.isBetter(best_score)) {
+                best_score = sc;
+                best_idx = i;
+            }
+        }
+        models[best_idx].copyTo(best);
+        return best_score;
+    }
 };
 
 // RANSAC (binary) quality
@@ -281,8 +294,7 @@ public:
     static Ptr<MagsacQuality> create(double maximum_thr, int points_size_,const Ptr<Error> &error_,
                              const Ptr<GammaValues> &gamma_generator,
                              double tentative_inlier_threshold_, int DoF, double sigma_quantile,
-                             double upper_incomplete_of_sigma_quantile,
-                             double lower_incomplete_of_sigma_quantile, double C_);
+                             double upper_incomplete_of_sigma_quantile, double C_);
 };
 
 // Least Median of Squares Quality
@@ -320,8 +332,8 @@ public:
                   Mat &/*non_degenerate_model*/, Score &/*non_degenerate_model_score*/) {
         return false;
     }
-    virtual void filterInliers (const cv::Mat &F, std::vector<bool> &inliers_mask) const { }
-    virtual int filterInliers (const cv::Mat &F, std::vector<int> &inliers, int num_inliers) const { return num_inliers; }
+    virtual void filterInliers (const cv::Mat &/*model*/, std::vector<bool> &/*inliers_mask*/) const { }
+    virtual int filterInliers (const cv::Mat &/*model*/, std::vector<int> &/*inliers*/, int num_inliers) const { return num_inliers; }
 };
 
 class EpipolarGeometryDegeneracy : public Degeneracy {
@@ -340,6 +352,12 @@ public:
     static Ptr<HomographyDegeneracy> create(const Mat &points_);
 };
 
+class FundamentalDegeneracyViaE : public EpipolarGeometryDegeneracy {
+public:
+    static Ptr<FundamentalDegeneracyViaE> create (const Ptr<Quality> &quality, const Mat &pts,
+            const Mat &calib_pts, const Matx33d &K1, const Matx33d &K2, bool is_f_objective);
+};
+
 class FundamentalDegeneracy : public EpipolarGeometryDegeneracy {
 public:
     virtual void setPrincipalPoint (double px_, double py_) = 0;
@@ -355,7 +373,7 @@ public:
 //////////////////////////////////////// ESTIMATOR //////////////////////////////////
 class Estimator : public Algorithm{
 public:
-    virtual int estimateModelNonMinimalSample (const Mat &model, const std::vector<int> &sample, int sample_size, std::vector<Mat>
+    virtual int estimateModelNonMinimalSample (const Mat &/*model*/, const std::vector<int> &sample, int sample_size, std::vector<Mat>
         &models, const std::vector<double> &weights) const {
         return estimateModelNonMinimalSample(sample, sample_size, models, weights);
     }
@@ -384,7 +402,7 @@ public:
     virtual int getMaxNumSolutions () const = 0;
     // return maximum number of possible solutions of non-minimal estimation.
     virtual int getMaxNumSolutionsNonMinimal () const = 0;
-    virtual void enforceRankConstraint (bool enforce) {}
+    virtual void enforceRankConstraint (bool /*enforce*/) {}
 };
 
 class HomographyEstimator : public Estimator {
@@ -423,13 +441,13 @@ class ModelVerifier : public Algorithm {
 public:
     virtual ~ModelVerifier() override = default;
     // Return true if model is good, false - otherwise.
-    virtual bool isModelGood(const Mat &model) = 0;
-    // Return true if score was computed during evaluation.
-    virtual bool getScore(Score &score) const = 0;
+    virtual bool isModelGood(const Mat &model, Score &score) = 0;
     // update verifier by given inlier number
-    virtual void update (int highest_inlier_number) = 0;
+    virtual void update (const Score &/*score*/, int /*iteration*/) {}
+    virtual void update (const Mat &/*model*/) {}
+    virtual void reset() {}
     virtual void updateSPRT (double time_model_est, double time_corr_ver, double new_avg_models, double new_delta, double new_epsilon, const Score &best_score) = 0;
-    static Ptr<ModelVerifier> create();
+    static Ptr<ModelVerifier> create(const Ptr<Quality> &qualtiy);
 };
 
 struct SPRT_history {
@@ -464,6 +482,7 @@ struct SPRT_history {
 class AdaptiveSPRT : public ModelVerifier {
 public:
     virtual const std::vector<SPRT_history> &getSPRTvector () const = 0;
+    virtual int avgNumCheckedPts () const = 0;
     static Ptr<AdaptiveSPRT> create (int state, const Ptr<Quality> &quality, int points_size_,
          double inlier_threshold_, double prob_pt_of_good_model, double prob_pt_of_bad_model,
          double time_sample, double avg_num_models, ::vsac::ScoreMethod score_type_,
@@ -485,13 +504,11 @@ public:
 ////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////////// NEIGHBORHOOD GRAPH /////////////////////////////////////////
 class NeighborhoodGraph : public Algorithm {
-private:
-    std::vector<std::vector<int>> g;
 public:
     virtual ~NeighborhoodGraph() override = default;
     // Return neighbors of the point with index @point_idx_ in the graph.
     virtual const std::vector<int> &getNeighbors(int point_idx_) const = 0;
-    virtual const std::vector<std::vector<int>> &getGraph () const { return g; }
+    virtual const std::vector<std::vector<int>> &getGraph () const = 0;
 };
 
 class RadiusSearchNeighborhoodGraph : public NeighborhoodGraph {
@@ -513,10 +530,10 @@ public:
             int cell_size_x_img1_, int cell_size_y_img1_,
             int cell_size_x_img2_, int cell_size_y_img2_, int max_neighbors);
 };
-class GridNeighborhoodGraph2 : public NeighborhoodGraph {
+class GridNeighborhoodGraph2Images : public NeighborhoodGraph {
 public:
-    static Ptr<GridNeighborhoodGraph2> create(const Mat &points, int points_size,
-            int cell_size_x_img1_, int cell_size_y_img1_, int cell_size_x_img2_, int cell_size_y_img2_);
+    static Ptr<GridNeighborhoodGraph2Images> create(const Mat &points, int points_size,
+        float cell_size_x_img1_, float cell_size_y_img1_, float cell_size_x_img2_, float cell_size_y_img2_);
 };
 
 ////////////////////////////////////// UNIFORM SAMPLER ////////////////////////////////////////////
@@ -582,15 +599,15 @@ public:
 ///////////////////////////////////// SPRT TERMINATION //////////////////////////////////////////
 class SPRTTermination : public Termination {
 public:
-    static Ptr<SPRTTermination> create(const std::vector<SPRT_history> &sprt_histories_,
+    static Ptr<SPRTTermination> create(const Ptr<AdaptiveSPRT> &sprt,
                double confidence, int points_size_, int sample_size_, int max_iterations_);
 };
 
 ///////////////////////////// PROGRESSIVE-NAPSAC-SPRT TERMINATION /////////////////////////////////
 class SPRTPNapsacTermination : public Termination {
 public:
-    static Ptr<SPRTPNapsacTermination> create(const std::vector<SPRT_history>&
-        sprt_histories_, double confidence, int points_size_, int sample_size_,
+    static Ptr<SPRTPNapsacTermination> create(const Ptr<AdaptiveSPRT> &
+        sprt, double confidence, int points_size_, int sample_size_,
         int max_iterations_, double relax_coef_);
 };
 
@@ -617,7 +634,7 @@ namespace Utils {
     void calibratePoints (const Mat &K1, const Mat &K2, const Mat &points, Mat &norm_points);
     void calibrateAndNormalizePointsPnP (const Mat &K, const Mat &pts, Mat &calib_norm_pts);
     void normalizeAndDecalibPointsPnP (const Mat &K, Mat &pts, Mat &calib_norm_pts);
-    void decomposeProjection (const Mat &P, Mat &K_, Mat &R, Mat &t, bool same_focal=false);
+    void decomposeProjection (const Mat &P, Matx33d &K, Matx33d &R, Vec3d &t, bool same_focal=false);
     double getCalibratedThreshold (double threshold, const Mat &K1, const Mat &K2);
     float findMedian (std::vector<float> &array);
     double intersectionOverUnion (const std::vector<bool> &a, const std::vector<bool> &b);
@@ -625,14 +642,15 @@ namespace Utils {
         std::vector<bool> &good_mask, std::vector<double> &depths1, std::vector<double> &depths2);
     void triangulatePoints (const Mat &E, const Mat &points1, const Mat &points2,  Mat &corr_points1, Mat &corr_points2,
                const Mat &K1, const Mat &K2, Mat &points3D, Mat &R, Mat &t, const std::vector<bool> &good_point_mask);
-    int triangulatePointsRt (const Mat &points, Mat &points3D, const Mat &K1_, const Mat &K2_, 
+    int triangulatePointsRt (const Mat &points, Mat &points3D, const Mat &K1_, const Mat &K2_,
         const cv::Mat &R, const cv::Mat &t_vec, std::vector<bool> &good_mask, std::vector<double> &depths1, std::vector<double> &depths2);
     int decomposeHomography (const Matx33d &Hnorm, std::vector<Matx33d> &R, std::vector<Vec3d> &t);
     double getPoissonCDF (double lambda, int tentative_inliers);
-    void getClosePoints (const cv::Mat &points, std::vector<std::vector<int>> &close_points, double close_thr_sqr);
+    void getClosePoints (const cv::Mat &points, std::vector<std::vector<int>> &close_points, float close_thr_sqr);
     bool satisfyCheirality (const cv::Matx33d& R, const cv::Vec3d &t, const cv::Vec3d &x1, const cv::Vec3d &x2);
     Vec3d getLeftEpipole (const Mat &F);
     Vec3d getRightEpipole (const Mat &F);
+    int removeClosePoints (const Mat &points, Mat &new_points, float thr);
 }
 namespace Math {
     // return skew symmetric matrix
@@ -642,6 +660,12 @@ namespace Math {
     Matx33d rotVec2RotMat (const Vec3d &v);
     Vec3d rotMat2RotVec (const Matx33d &R);
 }
+
+class SolverPoly {
+public:
+    virtual int getRealRoots (const std::vector<double> &coeffs, std::vector<double> &real_roots) = 0;
+    static Ptr<SolverPoly> create();
+};
 
 ///////////////////////////////////////// RANDOM GENERATOR /////////////////////////////////////
 class RandomGenerator : public Algorithm {
@@ -673,6 +697,24 @@ public:
     static Ptr<UniformRandomGenerator> create (int state, int max_range, int subset_size_);
 };
 
+class WeightFunction : public Algorithm {
+public:
+    virtual int getInliersWeights (const std::vector<float> &errors, std::vector<int> &inliers, std::vector<double> &weights) const = 0;
+    virtual int getInliersWeights (const std::vector<float> &errors, std::vector<int> &inliers, std::vector<double> &weights, double thr_sqr) const = 0;
+    virtual double getThreshold() const = 0;
+};
+
+class GaussWeightFunction : public WeightFunction {
+public:
+     static Ptr<GaussWeightFunction> create (double thr, double sigma, double outlier_prob);
+};
+
+class MagsacWeightFunction : public WeightFunction {
+public:
+    static Ptr<MagsacWeightFunction> create (const Ptr<GammaValues> &gamma_generator_,
+            int DoF_, double upper_incomplete_of_sigma_quantile, double C_, double max_sigma_);
+};
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////// LOCAL OPTIMIZATION /////////////////////////////////////////
 class LocalOptimization : public Algorithm {
@@ -688,7 +730,6 @@ public:
     virtual bool refineModel (const Mat &best_model, const Score &best_model_score,
                               Mat &new_model, Score &new_model_score) = 0;
     virtual void setCurrentRANSACiter (int /*ransac_iter*/) {}
-    virtual int getMaxIterations () const { return INT_MAX; }
     virtual int getNumLOoptimizations () const { return 0; }
 };
 
@@ -712,24 +753,13 @@ public:
            int lo_iter_max_iterations, double threshold_multiplier);
 };
 
-class SigmaConsensus : public LocalOptimization {
-public:
-    static Ptr<SigmaConsensus>
-    create(const Ptr<Estimator> &estimator_,
-           const Ptr<Quality> &quality, const Ptr<ModelVerifier> &verifier_,
-           const Ptr<GammaValues> &gamma_generator,
-           int max_lo_sample_size, int number_of_irwls_iters_,
-           int DoF, double sigma_quantile, double upper_incomplete_of_sigma_quantile,
-           double C_, double maximum_thr, Ptr<Termination> termination_=nullptr);
-};
-
-
 class SimpleLocalOptimization : public LocalOptimization {
 public:
-    static Ptr<SimpleLocalOptimization> create 
-        (const Ptr<Quality> &quality_, const Ptr<Estimator> &estimator_,
+    static Ptr<SimpleLocalOptimization> create
+        (const Ptr<Quality> &quality_, const Ptr<NonMinimalSolver> &estimator_,
          const Ptr<Termination> termination_, const Ptr<RandomGenerator> &random_gen,
-         int max_lo_iters_, double inlier_thr_sqr);
+         const Ptr<WeightFunction> weight_fnc_,
+         int max_lo_iters_, double inlier_thr_sqr, bool updated_lo=false);
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -748,12 +778,21 @@ public:
             Mat &new_model, Score &new_model_score) = 0;
 };
 
-class CovarianceSolver : public Algorithm{
+class NonMinimalPolisher : public FinalModelPolisher {
+public:
+    static Ptr<NonMinimalPolisher> create(const Ptr<Quality> &quality_, const Ptr<NonMinimalSolver> &solver_,
+            Ptr<WeightFunction> weight_fnc_, int max_iters_, double iou_thr_);
+};
+class CovarianceSolver : public NonMinimalSolver {
 public:
     ~CovarianceSolver() override = default;
-    virtual void setEnforceRankConstraint (bool enforce) {}
+    int estimate (const std::vector<int> &, int , std::vector<Mat> &,
+          const std::vector<double> &) const override {
+        assert(false && "not implemeted!");
+        return 0;
+    }
     virtual int estimate (const std::vector<bool> &new_mask, std::vector<Mat> &models,
-                  const std::vector<double> &weights) = 0;
+                  const std::vector<double> &weights) override = 0;
     virtual void reset() = 0;
 };
 class CovarianceEpipolarSolver : public CovarianceSolver {
@@ -770,24 +809,6 @@ class CovarianceAffineSolver : public CovarianceSolver {
 public:
     static Ptr<CovarianceAffineSolver> create (const Mat &points, const Matx33d &T1, const Matx33d &T2);
     static Ptr<CovarianceAffineSolver> create (const Mat &points);
-};
-
-class CovariancePolisher : public FinalModelPolisher {
-public:
-    static Ptr<CovariancePolisher> create (const Ptr<Degeneracy> &degeneracy, const Ptr<Quality> &quality_, const Ptr<CovarianceSolver> &solver_, int lsq_iters_, bool filter_pts_=false);
-    virtual void setInlierThreshold (double thr) = 0;
-};
-
-class WeightedPolisher : public FinalModelPolisher {
-public:
-    static Ptr<WeightedPolisher> create (const Ptr<Degeneracy> &degeneracy, const Ptr<Quality> &quality_, const Ptr<NonMinimalSolver> &solver_,
-                   const Ptr<GammaValues> &gamma_generator_, int number_of_irwls_iters_, int DoF, double upper_incomplete_of_sigma_quantile, double C, double max_sigma);
-};
-///////////////////////////////////// LEAST SQUARES POLISHER //////////////////////////////////////
-class LeastSquaresPolishing : public FinalModelPolisher {
-public:
-    static Ptr<LeastSquaresPolishing> create (const Ptr<Estimator> &estimator_,
-        const Ptr<Quality> &quality_, int lsq_iterations);
 };
 
 /*
@@ -817,23 +838,23 @@ protected:
     Ptr<FinalModelPolisher> polisher;
     Ptr<GammaValues> _gamma_generator;
     Ptr<MinimalSolver> _min_solver;
-    Ptr<NonMinimalSolver> _non_min_solver;
+    Ptr<NonMinimalSolver> _lo_solver, _fo_solver;
     Ptr<RandomGenerator> _lo_sampler;
-    Ptr<CovarianceSolver> cov_polisher;
+    Ptr<WeightFunction> _weight_fnc;
 
     double threshold, max_thr;
-    int points_size, _state;
+    int points_size, _state, filtered_points_size;
     bool parallel;
 
     Matx33d T1, T2;
-    Mat points, K1, K2, calib_points, image_points;
+    Mat points, K1, K2, calib_points, image_points, norm_points, filtered_points;
     Ptr<NeighborhoodGraph> graph;
     std::vector<Ptr<NeighborhoodGraph>> layers;
 
-    void initialize (int state, Ptr<MinimalSolver> &min_solver, Ptr<NonMinimalSolver> &non_min_solver, Ptr<GammaValues> &gamma_generator,
+    void initialize (int state, Ptr<MinimalSolver> &min_solver, Ptr<NonMinimalSolver> &non_min_solver,
                      Ptr<Error> &error, Ptr<Estimator> &estimator, Ptr<Degeneracy> &degeneracy, Ptr<Quality> &quality,
                      Ptr<ModelVerifier> &verifier, Ptr<LocalOptimization> &lo, Ptr<Termination> &termination,
-                     Ptr<Sampler> &sampler, Ptr<RandomGenerator> &lo_sampler, bool parallel_call);
+                     Ptr<Sampler> &sampler, Ptr<RandomGenerator> &lo_sampler, Ptr<WeightFunction> &weight_fnc, bool parallel_call);
 
     int getIndependentInliers (const Mat &model_, const std::vector<int> &sample,
                                std::vector<int> &inliers_, const int num_inliers_);
@@ -841,6 +862,8 @@ public:
     VSAC (const ::vsac::Params &params, cv::InputArray points1, cv::InputArray points2,
           cv::InputArray K1_, cv::InputArray K2_, cv::InputArray dist_coeff1, cv::InputArray dist_coeff2);
     bool run(::vsac::Output &ransac_output);
+    void reset();
+    int getMaxIters (int num_inliers, const Mat &model);
 };
 }}
 

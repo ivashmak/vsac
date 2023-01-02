@@ -8,7 +8,7 @@ enum LocalOptimMethod {LOCAL_OPTIM_NULL, LOCAL_OPTIM_INNER_LO, LOCAL_OPTIM_INNER
     LOCAL_OPTIM_GC, LOCAL_OPTIM_SIGMA};
 enum ScoreMethod {SCORE_METHOD_RANSAC, SCORE_METHOD_MSAC, SCORE_METHOD_MAGSAC, SCORE_METHOD_LMEDS};
 enum NeighborSearchMethod { NEIGH_FLANN_KNN, NEIGH_GRID, NEIGH_FLANN_RADIUS };
-enum EstimationMethod { Homography, Fundamental, Fundamental8, Essential, Affine, P3P, P6P};
+enum EstimationMethod { Homography, Fundamental, Fundamental8, Essential, Affine, P3P, P6P, Essential7};
 enum VerificationMethod { NullVerifier, SprtVerifier, ASPRT};
 enum PolishingMethod { NonePolisher, LSQPolisher, MAGSAC, CovPolisher};
 enum ErrorMetric { SAMPSON_ERR, SGD_ERR, SYMM_REPR_ERR, FORW_REPR_ERR, RERPOJ};
@@ -72,6 +72,16 @@ public:
 };
 
 class Params {
+public:
+    // Larsson parameters
+    bool is_larsson_optimization = true;
+    int larsson_leven_marq_iters_lo = 5, larsson_leven_marq_iters_fo = 15;
+
+    // solver for a null-space extraction
+    MethodSolver null_solver = GEM_SOLVER;
+
+    // prosac
+    int prosac_max_samples = 200000;
 private:
     // main parameters:
     double threshold, confidence;
@@ -128,14 +138,8 @@ private:
     // state of pseudo-random number generator
     int random_generator_state = 0;
 
-    // number of iterations to be done by RANSAC before applying local optimization
-    const int max_iters_before_LO = 100;
-
-    // solver for a null-space extraction
-    MethodSolver r_solver = GEM_SOLVER;
-
     // number of iterations of plane-and-parallax in DEGENSAC^+
-    int plane_and_parallax_max_iters = 100;
+    int plane_and_parallax_max_iters = 300;
 
     // magsac parameters:
     int DoF = 2;
@@ -176,11 +180,19 @@ public:
             default: CV_Error(cv::Error::StsNotImplemented, "Estimator has not implemented yet!");
         }
 
+        if (score_ == ScoreMethod::SCORE_METHOD_MAGSAC)
+            polisher = PolishingMethod::MAGSAC;
+
         // for PnP problem we can use only KNN graph
         if (estimator_ == EstimationMethod::P3P || estimator_ == EstimationMethod::P6P) {
             polisher = LSQPolisher;
             neighborsType = NeighborSearchMethod::NEIGH_FLANN_KNN;
             k_nearest_neighbors = 2;
+        }
+        if (estimator_ == EstimationMethod::P3P) {
+            // optimization for P3P is quite expensive, decrease number of iterations:
+            lo_inner_iterations = 8;
+            final_lsq_iters = 3;
         }
     }
 
@@ -202,16 +214,17 @@ public:
     void setImage1Size (cv::Size img_size_) {img1_size = img_size_; }
     void setImage2Size (cv::Size img_size_) {img2_size = img_size_; }
     void setImagesSize (cv::Size img1_size_, cv::Size img2_size_) {img1_size = img1_size_; img2_size = img2_size_; }
+    void setImagesSize_ (int w1, int h1, int w2, int h2) {img1_size = cv::Size(w1, h1); img2_size = cv::Size(w2, h2); }
     void setRandomGeneratorState (int state) { random_generator_state = state; }
     void setKmlesac (double k) { k_mlesac = k; }
-    void setRansacSolver (MethodSolver s) { r_solver = s; }
+    void setRansacSolver (MethodSolver s) { null_solver = s; }
+    void setFinalLSQiters (int iters) { final_lsq_iters = iters; }
+    void setEnforceRank (bool enforce) { enforce_singular_vals = enforce; }
 
     // getters
     bool isNonRandomnessTest () const { return is_nonrand_test; }
     bool isQuasiSampling () const { return IS_QUASI_SAMPLING; }
     bool isEnforceRank () const { return enforce_singular_vals; }
-    void setEnforceRank (bool enforce) { enforce_singular_vals = enforce; }
-    void setFinalLSQiters (int iters) { final_lsq_iters = iters; }
     bool isMaskRequired () const { return need_mask; }
     NeighborSearchMethod getNeighborsSearch () const { return neighborsType; }
     int getKNN () const { return k_nearest_neighbors; }
@@ -232,7 +245,7 @@ public:
     double getMaximumThreshold () const { return maximum_thr; }
     double getGraphCutSpatialCoherenceTerm () const { return spatial_coherence_term; }
     int getLOSampleSize () const { return lo_sample_size; }
-    MethodSolver getRansacSolver () const { return r_solver; }
+    MethodSolver getRansacSolver () const { return null_solver; }
     PolishingMethod getFinalPolisher () const { return polisher; }
     int getLOThresholdMultiplier() const { return lo_thr_multiplier; }
     int getLOIterativeSampleSize() const { return lo_iter_sample_size; }
@@ -247,7 +260,6 @@ public:
     VerificationMethod getVerifier () const { return verifier; }
     SamplingMethod getSampler () const { return sampler; }
     int getRandomGeneratorState () const { return random_generator_state; }
-    int getMaxItersBeforeLO () const { return max_iters_before_LO; }
     double getSPRTdelta () const { return sprt_delta; }
     double getSPRTepsilon () const { return sprt_eps; }
     double getSPRTavgNumModels () const { return avg_num_models; }
