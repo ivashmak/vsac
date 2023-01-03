@@ -1,3 +1,6 @@
+# UPDATE (3rd of January 2023)
+New version with some improvements including much faster and more accurate essential matrix estimation (and fundamental matrix with known intrinsics) is available in the branch `version2`. If no issues will be raised then new branch will be merged with master.
+
 Solvers for:
 - Affine matrix (3 points)
 - Homography matrix (4 points)
