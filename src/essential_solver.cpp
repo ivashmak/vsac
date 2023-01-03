@@ -168,10 +168,7 @@ public:
                 models.emplace_back(E);
             }
         } else {
-#if !defined(HAVE_EIGEN) && !defined(HAVE_LAPACK)
-            CV_Error(cv::Error::StsNotImplemented, "To run essential matrix estimation of Stewenius method you need to have either Eigen or LAPACK installed! Or switch to Nister algorithm");
-            return 0;
-#endif
+#if defined(HAVE_EIGEN) || defined(HAVE_LAPACK)
             for (int i = 0; i < 3; i++)
                 for (int j = 0; j < 3; j++)
                     // compute EE Transpose
@@ -204,7 +201,7 @@ public:
                      multPolysDegOne(null_space_mat[0][1].val, null_space_mat[1][0].val)).val,
                         null_space_mat[2][2].val)).copyTo(constraint_mat.row(9));
 
-#ifdef HAVE_EIGEN
+    #ifdef HAVE_EIGEN
             const Eigen::Matrix<double, 10, 20, Eigen::RowMajor> constraint_mat_eig((double *) constraint_mat.data);
             // (3) Compute the Gröbner basis. This turns out to be as simple as performing a
             // Gauss-Jordan elimination on the 10×20 matrix
@@ -227,7 +224,7 @@ public:
             Eigen::EigenSolver<Eigen::Matrix<double, 10, 10>> eigensolver(action_mat_eig);
             const Eigen::VectorXcd &eigenvalues = eigensolver.eigenvalues();
             const auto * const eig_vecs_ = (double *) eigensolver.eigenvectors().real().data();
-#else
+    #else
             Matx<double, 10, 10> A = constraint_mat.colRange(0, 10),
                              B = constraint_mat.colRange(10, 20), eliminated_mat;
             if (!solve(A, B, eliminated_mat, DECOMP_LU)) return 0;
@@ -249,7 +246,7 @@ public:
             dgeev_(&jobvl, &jobvr, &mat_order, action_mat_data, &lda, wr, wi, eig_vecs, &ldvl,
                     nullptr, &ldvr, work, &lwork, &info);
             if (info != 0) return 0;
-#endif
+    #endif
             models = std::vector<Mat>(); models.reserve(10);
 
             // Read off the values for the three unknowns at all the solution points and
@@ -275,6 +272,10 @@ public:
     #endif
                     models.emplace_back(model);
                 }
+#else
+        CV_Error(cv::Error::StsNotImplemented, "To run essential matrix estimation of Stewenius method you need to have either Eigen or LAPACK installed! Or switch to Nister algorithm");
+        return 0;
+#endif
         }
         return static_cast<int>(models.size());
     }
