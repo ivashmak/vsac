@@ -47,3 +47,14 @@ Older VSAC version is integrated into OpenCV could be run with the following fla
 - USAC_FAST
 - USAC_MAGSAC
 
+# Citation:
+```
+@InProceedings{Ivashechkin_2021_ICCV,
+    author    = {Ivashechkin, Maksym and Barath, Daniel and Matas, Ji\v{r}{\'\i}},
+    title     = {VSAC: Efficient and Accurate Estimator for H and F},
+    booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
+    month     = {October},
+    year      = {2021},
+    pages     = {15243-15252}
+}
+```
