@@ -697,8 +697,10 @@ JacobiSVD<MatrixType, QRPreconditioner>::compute(const MatrixType& matrix, unsig
   RealScalar maxDiagEntry = m_workMatrix.cwiseAbs().diagonal().maxCoeff();
 
   bool finished = false;
+  int count = 0;
   while(!finished)
   {
+    count++;
     finished = true;
 
     // do a sweep: for all index pairs (p,q), perform SVD of the corresponding 2x2 sub-matrix
@@ -734,6 +736,7 @@ JacobiSVD<MatrixType, QRPreconditioner>::compute(const MatrixType& matrix, unsig
         }
       }
     }
+    if (count >= 1000) break;
   }
 
   /*** step 3. The work matrix is now diagonal, so ensure it's positive so its diagonal entries are the singular values ***/
