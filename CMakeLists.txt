@@ -73,7 +73,7 @@ target_link_libraries(samples ${OpenCV_LIBS} lvsac)
 add_definitions(-fPIC)
 
 pybind11_add_module(pvsac "python/bindings.cpp")
-target_link_libraries(pvsac PRIVATE pybind11::module lvsac)
+target_link_libraries(pvsac PRIVATE pybind11::module lvsac pose_lib)
 ################################################
 
 add_executable(${PROJECT_NAME} ${POSE_LIB_SRC} main.cpp)

@@ -66,7 +66,7 @@ with open(path.join(path.abspath(path.dirname(__file__)), 'README.md')) as f:
 
 setup(
     name='pvsac',
-    version='0.1',
+    version='2.0',
     author='Maksym Ivashechkin',
     author_email='maksimivashechkin@gmail.com',
     license='MIT',  
