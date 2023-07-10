@@ -1,6 +1,6 @@
 #include "samples.hpp"
-#include <opencv2/xfeatures2d.hpp>
 #include <opencv2/highgui.hpp>
+#include <opencv2/features2d.hpp>
 #include <numeric>
 #include <algorithm>
 #include <iostream>
@@ -9,10 +9,6 @@
 bool Samples::getDescriptorsAndKeypoints(DETECTOR detector_name, const cv::Mat &image, cv::Mat &descriptors, std::vector<cv::KeyPoint> &keypoints, int max_features) {
     if (detector_name == DETECTOR::SIFT) {
         auto detector = cv::SIFT::create(max_features);
-        detector->detect(image, keypoints);
-        detector->compute(image, keypoints, descriptors);
-    } else if (detector_name == DETECTOR::SURF) {
-        auto detector = cv::xfeatures2d::SURF::create(max_features);
         detector->detect(image, keypoints);
         detector->compute(image, keypoints, descriptors);
     } else if (detector_name == DETECTOR::ORB) {
